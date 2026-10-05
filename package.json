@@ -1,7 +1,7 @@
 {
   "name": "ytdown",
   "version": "1.0.0",
-  "description": "Download trimmed audio from YouTube videos",
+  "description": "Download trimmed audio or video from YouTube and other sites",
   "main": "app/main.js",
   "scripts": {
     "start": "node launch.js",
@@ -15,7 +15,7 @@
   },
   "build": {
     "appId": "com.ytdown.app",
-    "productName": "YouTube Audio Trimmer",
+    "productName": "Video and Audio Trimmer",
     "directories": {
       "output": "dist"
     },

@@ -13,6 +13,6 @@ Desktop app (Electron) that downloads the audio (or video) of a video, with star
 npm run build        # installer + portable exe -> dist/
 npm run build:dir    # unpacked app only (fast, for testing) -> dist/win-unpacked/
 ```
-- Output: `dist/YouTube Audio Trimmer-Setup-<version>.exe` (installer) and `dist/YouTube Audio Trimmer-<version>-portable.exe`.
+- Output: `dist/Video and Audio Trimmer-Setup-<version>.exe` (installer) and `dist/Video and Audio Trimmer-<version>-portable.exe`.
 - Packaged builds store yt-dlp in `%APPDATA%\ytdown\bin` (the app offers to download it on first start); dev runs use `bin/`.
 - Builds are unsigned and use the default Electron icon.

@@ -36,7 +36,7 @@ async function createWindow() {
   const port = await startServer();
   win = new BrowserWindow({
     width: 980, height: 820, minWidth: 720, minHeight: 640,
-    title: 'YouTube Audio Trimmer',
+    title: 'Video and Audio Trimmer',
     autoHideMenuBar: true,
     webPreferences: { preload: path.join(ROOT, 'preload.js'), contextIsolation: true },
   });
