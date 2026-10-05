@@ -1,13 +1,15 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const { spawn } = require('child_process');
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
 const ROOT = __dirname;
-const YTDLP = fs.existsSync(path.join(ROOT, '..', 'bin', 'yt-dlp.exe'))
-  ? path.join(ROOT, '..', 'bin', 'yt-dlp.exe')
-  : 'yt-dlp';
+// Local/dev builds keep the binary in <project>/bin.
+const BIN_DIR = path.join(ROOT, '..', 'bin');
+const YTDLP = path.join(BIN_DIR, 'yt-dlp.exe');
+const YTDLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe';
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
 
@@ -52,6 +54,58 @@ ipcMain.handle('choose-folder', async (_e, current) => {
 });
 
 ipcMain.handle('open-folder', (_e, folder) => shell.openPath(folder));
+
+function ytdlpVersion() {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(YTDLP)) return resolve(null);
+    let out = '';
+    const c = spawn(YTDLP, ['--version'], { windowsHide: true });
+    c.stdout.on('data', (d) => { out += d; });
+    c.on('error', () => resolve(null));
+    c.on('close', (code) => resolve(code === 0 ? out.trim() : null));
+  });
+}
+
+function fetchToFile(url, dest, onProgress, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 5) return reject(new Error('Too many redirects'));
+    https.get(url, { headers: { 'User-Agent': 'ytdown' } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return fetchToFile(new URL(res.headers.location, url).href, dest, onProgress, redirects + 1).then(resolve, reject);
+      }
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
+      const total = Number(res.headers['content-length']) || 0;
+      let got = 0;
+      const out = fs.createWriteStream(dest);
+      res.on('data', (chunk) => { got += chunk.length; if (total) onProgress(got / total * 100); });
+      res.pipe(out);
+      out.on('finish', () => out.close(resolve));
+      out.on('error', reject);
+      res.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
+ipcMain.handle('ytdlp-status', async () => {
+  const version = await ytdlpVersion();
+  return { installed: !!version, version, path: YTDLP };
+});
+
+ipcMain.handle('ytdlp-install', async (event) => {
+  const part = YTDLP + '.part';
+  try {
+    fs.mkdirSync(BIN_DIR, { recursive: true });
+    await fetchToFile(YTDLP_URL, part, (percent) => event.sender.send('ytdlp-install-progress', { percent }));
+    fs.renameSync(part, YTDLP);
+    const version = await ytdlpVersion();
+    if (!version) throw new Error('Downloaded file does not run correctly');
+    return { ok: true, version };
+  } catch (e) {
+    fs.rmSync(part, { force: true });
+    return { ok: false, error: e.message };
+  }
+});
 
 ipcMain.handle('download', (event, { url, start, end, format, folder }) => new Promise((resolve) => {
   const args = [

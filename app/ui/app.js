@@ -209,6 +209,7 @@ api.onProgress((m) => {
 
 $('download').onclick = async () => {
   if (!currentId || downloading) return;
+  if (!ytdlpInstalled) { showModal(INSTALL_TEXT); return; }
   downloading = true;
   $('download').disabled = true;
   $('open-folder').hidden = true;
@@ -237,3 +238,55 @@ $('download').onclick = async () => {
     setStatus(result.error, 'error');
   }
 };
+
+// ---------- yt-dlp install / update ----------
+let ytdlpInstalled = false;
+
+async function refreshYtdlp() {
+  const s = await api.ytdlpStatus();
+  ytdlpInstalled = s.installed;
+  $('ytdlp-info').textContent = s.installed ? `yt-dlp ${s.version}` : 'yt-dlp: not installed';
+  $('update-ytdlp').textContent = s.installed ? 'Update yt-dlp' : 'Install yt-dlp';
+  return s;
+}
+
+function showModal({ title, text, button }) {
+  $('modal-title').textContent = title;
+  $('modal-text').innerHTML = text;
+  $('modal-go').textContent = button;
+  $('modal-error').hidden = true;
+  $('modal-bar').hidden = true;
+  $('modal-fill').style.width = '0';
+  $('modal-go').disabled = false;
+  $('modal-later').disabled = false;
+  $('modal').hidden = false;
+}
+
+const INSTALL_TEXT = { title: 'yt-dlp is required', button: 'Download yt-dlp',
+  text: "This app uses <b>yt-dlp</b> to fetch the audio. It isn't installed yet. Download it now (about 18&nbsp;MB, from the official GitHub releases)?" };
+const UPDATE_TEXT = { title: 'Update yt-dlp', button: 'Update',
+  text: 'Download the latest yt-dlp release and replace the current one? Do this if downloads start failing.' };
+
+$('modal-later').onclick = () => { $('modal').hidden = true; };
+$('modal-go').onclick = async () => {
+  $('modal-go').disabled = true;
+  $('modal-later').disabled = true;
+  $('modal-error').hidden = true;
+  $('modal-bar').hidden = false;
+  const r = await api.ytdlpInstall();
+  if (r.ok) {
+    await refreshYtdlp();
+    $('modal').hidden = true;
+    setStatus(`yt-dlp ${r.version} installed`, 'ok');
+  } else {
+    $('modal-error').textContent = 'Download failed: ' + r.error;
+    $('modal-error').hidden = false;
+    $('modal-go').textContent = 'Retry';
+    $('modal-go').disabled = false;
+    $('modal-later').disabled = false;
+  }
+};
+api.onInstallProgress((m) => { $('modal-fill').style.width = m.percent + '%'; });
+$('update-ytdlp').onclick = () => showModal(ytdlpInstalled ? UPDATE_TEXT : INSTALL_TEXT);
+
+refreshYtdlp().then((s) => { if (!s.installed) showModal(INSTALL_TEXT); });

@@ -71,10 +71,25 @@
       <div class="status-wrap">
         <div id="bar"><div id="bar-fill"></div></div>
         <div id="status">Ready</div>
+        <div id="ytdlp-info">yt-dlp: checking…</div>
       </div>
       <button id="open-folder" hidden>Show folder</button>
+      <button id="update-ytdlp" title="Download the latest yt-dlp">Update yt-dlp</button>
     </div>
   </footer>
+
+  <div id="modal" hidden>
+    <div class="dialog">
+      <h2 id="modal-title"></h2>
+      <p id="modal-text"></p>
+      <div id="modal-bar" hidden><div id="modal-fill"></div></div>
+      <p id="modal-error" class="error" hidden></p>
+      <div class="actions">
+        <button id="modal-later">Later</button>
+        <button id="modal-go" class="primary">Download yt-dlp</button>
+      </div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>
