@@ -388,16 +388,56 @@ $('browse').onclick = async () => {
 api.defaultFolder().then((f) => { $('folder').value = f; });
 $('open-folder').onclick = () => api.openFolder($('folder').value);
 
+// Progress display: bar + "label 45% · 2.3 MB/s · 0:12 left". While nothing measurable is happening
+// (finding the stream, converting) the bar is indeterminate and an elapsed timer shows it is still alive.
+let phase = null; // { text, since } while indeterminate
+let phaseTimer = null;
+
+function fmtSpeed(bps) { return bps >= 1048576 ? `${(bps / 1048576).toFixed(1)} MB/s` : `${Math.round(bps / 1024)} KB/s`; }
+function clock(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), r = sec % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}` : `${m}:${String(r).padStart(2, '0')}`;
+}
+function fmtEta(sec) { return `${clock(sec)} left`; }
+
+function setBar(pctValue) {
+  const determinate = pctValue != null;
+  $('bar').classList.toggle('indeterminate', !determinate);
+  $('bar-fill').style.width = determinate ? `${pctValue}%` : '';
+  $('bar-label').textContent = determinate ? `${Math.floor(pctValue)}%` : '';
+}
+
+function startPhase(text) {
+  if (!phase || phase.text !== text) phase = { text, since: Date.now() };
+  setBar(null);
+  tickPhase();
+}
+function tickPhase() {
+  if (phase) setStatus(`${phase.text} (${clock((Date.now() - phase.since) / 1000)})`);
+}
+function stopPhase() { phase = null; }
+
 api.onProgress((m) => {
-  if (m.stage === 'downloading') {
-    $('bar').classList.remove('indeterminate');
-    $('bar-fill').style.width = m.percent + '%';
-    setStatus(`Downloading… ${m.percent.toFixed(0)}%`);
-  } else if (m.stage === 'converting') {
-    $('bar').classList.add('indeterminate');
-    setStatus('Converting…');
+  if (m.stage === 'preparing') startPhase('Preparing – finding the stream…');
+  else if (m.stage === 'converting') startPhase('Converting / merging…');
+  else if (m.stage === 'downloading') {
+    stopPhase();
+    setBar(m.percent);
+    const what = m.trim ? 'Cutting' : 'Downloading';
+    const label = m.step ? `${what} (step ${m.step.n}/${m.step.of})` : what;
+    const parts = [`${label} ${Math.floor(m.percent)}%`];
+    if (m.speed) parts.push(fmtSpeed(m.speed));
+    if (m.eta) parts.push(fmtEta(m.eta));
+    setStatus(parts.join(' · '));
   }
 });
+
+$('cancel').onclick = async () => {
+  $('cancel').disabled = true;
+  setStatus('Cancelling…');
+  await api.cancelDownload();
+};
 
 $('download').onclick = async () => {
   if (!currentUrl || downloading) return;
@@ -405,15 +445,17 @@ $('download').onclick = async () => {
   downloading = true;
   $('download').disabled = true;
   $('open-folder').hidden = true;
-  $('bar').classList.add('indeterminate');
-  $('bar-fill').style.width = '0';
-  setStatus('Starting…');
+  $('cancel').hidden = false;
+  $('cancel').disabled = false;
+  startPhase('Starting…');
+  phaseTimer = setInterval(tickPhase, 1000);
 
   const trimmed = start > 0.05 || end < duration - 0.05;
   const result = await api.download({
     url: currentUrl,
     start: trimmed ? start : null,
     end: trimmed ? end : null,
+    duration,
     kind: $('kind').value,
     format: $('format').value,
     height: Number($('quality').value),
@@ -421,15 +463,19 @@ $('download').onclick = async () => {
   });
 
   downloading = false;
+  clearInterval(phaseTimer);
+  stopPhase();
   $('download').disabled = false;
-  $('bar').classList.remove('indeterminate');
+  $('cancel').hidden = true;
   if (result.ok) {
-    $('bar-fill').style.width = '100%';
+    setBar(100);
     setStatus('Saved: ' + (result.file || $('folder').value), 'ok');
     $('open-folder').hidden = false;
   } else {
-    $('bar-fill').style.width = '0';
-    setStatus(result.error, 'error');
+    setBar(0);
+    $('bar-label').textContent = '';
+    if (result.cancelled) setStatus('Download cancelled.');
+    else setStatus(result.error, 'error');
   }
 };
 

@@ -3,6 +3,7 @@ const { spawn } = require('child_process');
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const ROOT = __dirname;
@@ -183,51 +184,178 @@ ipcMain.handle('ytdlp-install', async (event) => {
   }
 });
 
-ipcMain.handle('download', (event, { url, kind, start, end, format, height, folder }) => new Promise((resolve) => {
-  const args = [
-    '--no-playlist', '--newline', '--js-runtimes', 'node',
-    '--progress-template', 'download:PROGRESS %(progress._percent_str)s',
-    '--print', 'after_move:FILE %(filepath)s',
-    '-o', path.join(folder, '%(title)s.%(ext)s'),
-  ];
-  if (kind === 'video') {
-    // Best video+audio up to the chosen height; -S ext prefers mp4/m4a streams so the merge is a cheap remux.
-    args.push('-f', 'bv*+ba/b', '-S', `res:${Number(height) || 4320},ext`, '--merge-output-format', format);
-  } else {
-    args.push('-x', '--audio-format', format, '--audio-quality', '0');
-  }
-  if (start != null || end != null) {
-    const s = start ?? 0;
-    args.push('--download-sections', `*${s}-${end ?? 'inf'}`, '--force-keyframes-at-cuts');
-  }
-  args.push(url);
+let activeDownload = null; // { child, cancelled }
 
-  const send = (msg) => event.sender.send('download-progress', msg);
-  let file = '', errText = '';
-  const child = spawn(YTDLP, args, { windowsHide: true });
-  const onLine = (line) => {
-    line = line.trim();
-    if (line.startsWith('PROGRESS')) {
-      const pct = parseFloat(line.slice(8));
-      if (!isNaN(pct)) send({ stage: 'downloading', percent: pct });
-    } else if (line.startsWith('FILE ')) {
-      file = line.slice(5);
-    } else if (/\[(ExtractAudio|Merger|ffmpeg)\]/.test(line)) {
-      send({ stage: 'converting' });
-    }
+ipcMain.handle('cancel-download', () => {
+  if (!activeDownload) return false;
+  activeDownload.cancelled = true;
+  const pid = activeDownload.child?.pid;
+  // kill the whole tree: yt-dlp may have an ffmpeg child
+  if (pid) spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true });
+  return true;
+});
+
+// Runs a child process, feeding its stdout lines to onLine. It is registered on the job so it can be cancelled.
+function runChild(job, cmd, args, onLine) {
+  return new Promise((resolve) => {
+    let buf = '', err = '';
+    const child = spawn(cmd, args, { windowsHide: true });
+    job.child = child;
+    child.stdout.on('data', (d) => {
+      buf += d; const lines = buf.split(/\r?\n/); buf = lines.pop(); lines.forEach(onLine);
+    });
+    child.stderr.on('data', (d) => { err = (err + d).slice(-20000); }); // ffmpeg can be chatty
+    child.on('error', (e) => resolve({ code: -1, err: `Could not start ${cmd}: ${e.message}` }));
+    child.on('close', (code) => { if (buf) onLine(buf); resolve({ code, err }); });
+  });
+}
+
+const AUDIO_CODEC = {
+  mp3: ['-c:a', 'libmp3lame', '-q:a', '0'],
+  m4a: ['-c:a', 'aac', '-b:a', '192k'],
+  opus: ['-c:a', 'libopus', '-b:a', '160k'],
+  wav: ['-c:a', 'pcm_s16le'],
+};
+
+const lastError = (text, fallback) =>
+  text.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('ERROR') || (l && !l.startsWith('['))).pop() || fallback;
+
+// Download flow.
+//  - Whole video/audio: yt-dlp downloads + converts straight into the target folder.
+//  - Trimmed: ffmpeg seeking over YouTube's HTTP streams stalls for anything but tiny files, so yt-dlp first
+//    downloads the full stream(s) into a temp folder (fast, native downloader) and ffmpeg then cuts + encodes
+//    the local file, which also gives exact progress.
+ipcMain.handle('download', async (event, { url, kind, start, end, duration, format, height, folder }) => {
+  if (activeDownload) return { ok: false, error: 'A download is already running.' };
+  const job = activeDownload = { child: null, cancelled: false };
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const send = (msg) => {
+    event.sender.send('download-progress', msg);
+    if (!win || win.isDestroyed()) return;
+    if (msg.stage === 'downloading' && msg.percent != null) win.setProgressBar(Math.min(1, msg.percent / 100));
+    else win.setProgressBar(2, { mode: 'indeterminate' });
   };
-  let buf = '';
-  child.stdout.on('data', (d) => {
-    buf += d; const lines = buf.split(/\r?\n/); buf = lines.pop(); lines.forEach(onLine);
-  });
-  child.stderr.on('data', (d) => { errText += d; });
-  child.on('error', (e) => resolve({ ok: false, error: `Could not start yt-dlp: ${e.message}` }));
-  child.on('close', (code) => {
-    if (buf) onLine(buf);
-    if (code === 0) resolve({ ok: true, file });
-    else resolve({ ok: false, error: errText.split('\n').filter((l) => l.startsWith('ERROR')).pop() || errText.slice(-500) || `yt-dlp exited with ${code}` });
-  });
-}));
+
+  const trimmed = start != null || end != null;
+  const clipLen = trimmed ? (end ?? duration ?? 0) - (start ?? 0) : 0;
+  let streams = kind === 'video' ? 2 : 1; // yt-dlp tells us the real number once it has picked formats
+  let stream = 0;
+  const steps = () => streams + (trimmed ? 1 : 0); // one extra step for the local cut
+  const dests = [];
+  let file = '', tmpDir = null, outFile = null;
+
+  try {
+    send({ stage: 'preparing' });
+    tmpDir = trimmed ? fs.mkdtempSync(path.join(os.tmpdir(), 'ytdown-')) : null;
+
+    // ---- step 1..n: yt-dlp ----
+    const args = [
+      // --print implies --quiet, which would hide all progress/stage lines we parse below
+      '--no-playlist', '--newline', '--no-quiet', '--progress', '--js-runtimes', 'node',
+      '--progress-template', 'download:PROGRESS %(progress._percent_str)s|%(progress.speed)s|%(progress.eta)s',
+      '--print', 'after_move:FILE %(filepath)s',
+      '-o', path.join(tmpDir ?? folder, '%(title)s.%(ext)s'),
+    ];
+    const res = `res:${Number(height) || 4320},ext`; // -S ext prefers mp4/m4a streams so merging is a cheap remux
+    if (trimmed) {
+      if (kind === 'video') args.push('-f', 'bv*+ba/b', '-S', res, '--merge-output-format', 'mkv'); // mkv holds anything
+      else args.push('-f', 'ba/b');
+    } else if (kind === 'video') {
+      args.push('-f', 'bv*+ba/b', '-S', res, '--merge-output-format', format);
+    } else {
+      args.push('-x', '--audio-format', format, '--audio-quality', '0');
+    }
+    args.push(url);
+
+    const onYtdlpLine = (line) => {
+      line = line.trim();
+      let m;
+      if (line.startsWith('PROGRESS')) {
+        const [pctStr, speed, eta] = line.slice(8).split('|');
+        const pct = parseFloat(pctStr);
+        if (isNaN(pct)) return;
+        const n = Math.max(stream, 1);
+        send({
+          stage: 'downloading',
+          percent: ((n - 1 + pct / 100) / steps()) * 100,
+          step: steps() > 1 ? { n, of: steps() } : null,
+          speed: parseFloat(speed) || null,
+          eta: steps() === 1 ? (parseFloat(eta) || null) : null,
+        });
+      } else if (line.startsWith('FILE ')) {
+        file = line.slice(5);
+      } else if ((m = /Downloading \d+ format\(s\):\s*(\S+)/.exec(line))) {
+        streams = m[1].split('+').length;
+      } else if (line.startsWith('[download] Destination:')) {
+        stream++;
+        dests.push(line.slice('[download] Destination:'.length).trim());
+      } else if (/^\[(ExtractAudio|Merger|VideoRemuxer|VideoConvertor|Fixup\w*|ffmpeg)\]/.test(line)) {
+        send({ stage: 'converting' });
+      }
+    };
+    const dl = await runChild(job, YTDLP, args, onYtdlpLine);
+    if (job.cancelled) throw Object.assign(new Error('cancelled'), { cancelled: true });
+    if (dl.code !== 0) return { ok: false, error: lastError(dl.err, dl.code === -1 ? dl.err : `yt-dlp exited with ${dl.code}`) };
+    if (!trimmed) return { ok: true, file };
+    if (!file) return { ok: false, error: 'yt-dlp did not report the downloaded file.' };
+
+    // ---- last step: cut + encode locally ----
+    const base = path.basename(file, path.extname(file));
+    fs.mkdirSync(folder, { recursive: true }); // yt-dlp would create it; here ffmpeg writes the output
+    outFile = path.join(folder, `${base}.${format}`);
+    const ff = ['-y', '-hide_banner', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1',
+      '-ss', String(start ?? 0), '-i', file];
+    if (end != null) ff.push('-t', String(clipLen));
+    if (kind === 'video') {
+      ff.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-c:a', 'aac', '-b:a', '192k');
+      if (format === 'mp4') ff.push('-movflags', '+faststart');
+    } else {
+      ff.push('-vn', ...AUDIO_CODEC[format]);
+    }
+    ff.push(outFile);
+
+    send({ stage: 'converting' });
+    let outSec = null, speedX = 0;
+    const onFfmpegLine = (line) => {
+      line = line.trim();
+      let m;
+      if ((m = /^out_time_us=(\d+)/.exec(line))) outSec = Number(m[1]) / 1e6;
+      else if ((m = /^speed=\s*([\d.]+)x/.exec(line))) speedX = parseFloat(m[1]);
+      else if (line.startsWith('progress=') && outSec != null && clipLen > 0) {
+        const frac = Math.min(1, outSec / clipLen);
+        send({
+          stage: 'downloading',
+          percent: ((steps() - 1 + frac) / steps()) * 100,
+          step: { n: steps(), of: steps() },
+          trim: true,
+          eta: speedX > 0 ? Math.max(0, clipLen - outSec) / speedX : null,
+        });
+      }
+    };
+    const cut = await runChild(job, 'ffmpeg', ff, onFfmpegLine);
+    if (job.cancelled) throw Object.assign(new Error('cancelled'), { cancelled: true });
+    if (cut.code !== 0) {
+      fs.rmSync(outFile, { force: true });
+      return { ok: false, error: lastError(cut.err, cut.code === -1 ? cut.err : `ffmpeg exited with ${cut.code}`) };
+    }
+    return { ok: true, file: outFile };
+  } catch (e) {
+    if (!e.cancelled) return { ok: false, error: e.message };
+    // Cancelled: remove what this run left behind (.part/.ytdl files, per-format intermediates like name.f399.mp4,
+    // the temp folder, a half-written output). Never a plain destination: it may be an earlier finished download.
+    for (const p of dests) {
+      const targets = [p + '.part', p + '.ytdl'];
+      if (/\.f\d+\.\w+$/.test(p)) targets.push(p);
+      for (const t of targets) { try { fs.rmSync(t, { force: true }); } catch { /* still locked: leave it */ } }
+    }
+    if (outFile) { try { fs.rmSync(outFile, { force: true }); } catch { /* ignore */ } }
+    return { ok: false, cancelled: true };
+  } finally {
+    activeDownload = null;
+    if (win && !win.isDestroyed()) win.setProgressBar(-1);
+    if (tmpDir) { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ } }
+  }
+});
 
 app.whenReady().then(() => {
   // Some CDNs only serve the stream with the headers yt-dlp reported for it.

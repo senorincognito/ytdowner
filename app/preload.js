@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('api', {
   chooseFolder: (current) => ipcRenderer.invoke('choose-folder', current),
   openFolder: (folder) => ipcRenderer.invoke('open-folder', folder),
   download: (opts) => ipcRenderer.invoke('download', opts),
+  cancelDownload: () => ipcRenderer.invoke('cancel-download'),
   ytdlpStatus: () => ipcRenderer.invoke('ytdlp-status'),
   ytdlpLatest: () => ipcRenderer.invoke('ytdlp-latest'),
   resolveMedia: (url) => ipcRenderer.invoke('resolve-media', url),
