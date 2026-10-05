@@ -183,14 +183,19 @@ ipcMain.handle('ytdlp-install', async (event) => {
   }
 });
 
-ipcMain.handle('download', (event, { url, start, end, format, folder }) => new Promise((resolve) => {
+ipcMain.handle('download', (event, { url, kind, start, end, format, height, folder }) => new Promise((resolve) => {
   const args = [
-    '--no-playlist', '--newline', '-x', '--audio-format', format, '--audio-quality', '0',
-    '--js-runtimes', 'node',
+    '--no-playlist', '--newline', '--js-runtimes', 'node',
     '--progress-template', 'download:PROGRESS %(progress._percent_str)s',
     '--print', 'after_move:FILE %(filepath)s',
     '-o', path.join(folder, '%(title)s.%(ext)s'),
   ];
+  if (kind === 'video') {
+    // Best video+audio up to the chosen height; -S ext prefers mp4/m4a streams so the merge is a cheap remux.
+    args.push('-f', 'bv*+ba/b', '-S', `res:${Number(height) || 4320},ext`, '--merge-output-format', format);
+  } else {
+    args.push('-x', '--audio-format', format, '--audio-quality', '0');
+  }
   if (start != null || end != null) {
     const s = start ?? 0;
     args.push('--download-sections', `*${s}-${end ?? 'inf'}`, '--force-keyframes-at-cuts');

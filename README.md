@@ -1,6 +1,6 @@
 # ytdown
 
-Desktop app (Electron) that downloads the audio of a video, with start/end trim markers on a timeline. Works with YouTube (embedded player) and any site supported by yt-dlp (direct stream preview, or typed times when the stream cannot be played).
+Desktop app (Electron) that downloads the audio (or video) of a video, with start/end trim markers on a timeline. Works with YouTube (embedded player) and any site supported by yt-dlp (direct stream preview, or typed times when the stream cannot be played).
 
 ## Setup
 1. `npm install`

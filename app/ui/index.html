@@ -61,9 +61,16 @@
 
   <footer>
     <div class="row">
+      <label>Export
+        <select id="kind"><option value="audio">Audio</option><option value="video">Video</option></select>
+      </label>
       <label>Format
-        <select id="format">
-          <option>mp3</option><option>m4a</option><option>opus</option><option>wav</option>
+        <select id="format"></select>
+      </label>
+      <label id="quality-label" hidden>Max quality
+        <select id="quality">
+          <option value="0">Best</option><option value="1080">1080p</option><option value="720">720p</option>
+          <option value="480">480p</option><option value="360">360p</option>
         </select>
       </label>
       <label class="grow">Save to

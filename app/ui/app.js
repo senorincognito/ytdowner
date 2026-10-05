@@ -365,6 +365,21 @@ function onLoad() {
 $('load').onclick = onLoad;
 $('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') onLoad(); });
 
+// ---------- export kind (audio / video) ----------
+const FORMATS = { audio: ['mp3', 'm4a', 'opus', 'wav'], video: ['mp4', 'mkv'] };
+const lastFormat = { audio: 'mp3', video: 'mp4' };
+
+function applyKind() {
+  const kind = $('kind').value;
+  $('format').innerHTML = FORMATS[kind].map((f) => `<option>${f}</option>`).join('');
+  $('format').value = lastFormat[kind];
+  $('quality-label').hidden = kind !== 'video';
+  $('download').textContent = `Download ${kind}`;
+}
+$('kind').onchange = applyKind;
+$('format').onchange = () => { lastFormat[$('kind').value] = $('format').value; };
+applyKind();
+
 // ---------- download ----------
 $('browse').onclick = async () => {
   const f = await api.chooseFolder($('folder').value);
@@ -399,7 +414,9 @@ $('download').onclick = async () => {
     url: currentUrl,
     start: trimmed ? start : null,
     end: trimmed ? end : null,
+    kind: $('kind').value,
     format: $('format').value,
+    height: Number($('quality').value),
     folder: $('folder').value,
   });
 
