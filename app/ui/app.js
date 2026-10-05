@@ -9,12 +9,12 @@ let playingSelection = false;
 let downloading = false;
 
 // ---------- time helpers ----------
-function fmt(sec) {
+function fmt(sec, digits = 1) {
   sec = Math.max(0, sec);
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = sec - h * 3600 - m * 60;
-  const ss = s.toFixed(1).padStart(4, '0');
+  const ss = s.toFixed(digits).padStart(digits + 3, '0');
   return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
 }
 
@@ -55,7 +55,12 @@ async function loadVideo(id) {
     playerVars: { rel: 0, playsinline: 1, origin: location.origin },
     events: {
       onReady: () => waitForDuration(),
-      onStateChange: (e) => { if (e.data === YT.PlayerState.PLAYING && !duration) waitForDuration(); },
+      onStateChange: (e) => {
+        if (e.data === YT.PlayerState.PLAYING && !duration) waitForDuration();
+        if (e.data === YT.PlayerState.PLAYING && pauseOnPlay) { // finish a frame step on a never-started player
+          pauseOnPlay = false; player.pauseVideo(); if (cursor !== null) player.seekTo(cursor, true);
+        }
+      },
       onError: (e) => {
         const msgs = { 2: 'Invalid video ID.', 5: 'Player error.', 100: 'Video not found or private.',
                        101: 'The owner disabled embedding for this video.', 150: 'The owner disabled embedding for this video.',
@@ -66,6 +71,41 @@ async function loadVideo(id) {
   });
   $('player-wrap').classList.add('loaded');
 }
+
+// Frame stepping. The player API has no frame info, so assume 30 fps until yt-dlp reports the real rate.
+let fps = 30;
+let pauseOnPlay = false;
+let cursor = null; // last frame-step target; getCurrentTime() can lag right after a seek
+
+function loadFps(id) {
+  fps = 30;
+  $('fps').textContent = '30 fps (assumed)';
+  api.videoFps(id).then((f) => {
+    if (f && id === currentId) { fps = f; $('fps').textContent = `${+f.toFixed(2)} fps`; }
+  });
+}
+
+function stepFrame(dir) {
+  if (!player || !duration) return;
+  playingSelection = false;
+  player.pauseVideo();
+  const t = cursor ?? player.getCurrentTime();
+  const last = Math.max(0, Math.ceil(duration * fps) - 1);
+  const frame = Math.min(last, Math.max(0, Math.floor(t * fps + 1e-3) + dir));
+  cursor = (frame + 0.25) / fps; // aim inside the frame so float error can't land on a neighbour
+  player.seekTo(cursor, true);
+  // A never-started (-1) or cued (5) player ignores seeks until it has played once.
+  const st = player.getPlayerState();
+  if (st === YT.PlayerState.UNSTARTED || st === YT.PlayerState.CUED) { pauseOnPlay = true; player.playVideo(); }
+}
+$('prev-frame').onclick = () => stepFrame(-1);
+$('next-frame').onclick = () => stepFrame(1);
+window.addEventListener('keydown', (e) => {
+  if ((e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+  if (!$('modal').hidden || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+  e.preventDefault();
+  stepFrame(e.key === 'ArrowLeft' ? -1 : 1);
+});
 
 function waitForDuration() {
   const tick = () => {
@@ -78,6 +118,7 @@ function waitForDuration() {
       $('download').disabled = downloading;
       setStatus('Ready — set your start and end markers');
       render();
+      loadFps(currentId);
     } else setTimeout(tick, 200);
   };
   tick();
@@ -102,7 +143,7 @@ function timeFromEvent(e) {
   return Math.min(duration, Math.max(0, ((e.clientX - r.left) / r.width) * duration));
 }
 
-function seek(t) { if (player && duration) player.seekTo(t, true); }
+function seek(t) { cursor = null; if (player && duration) player.seekTo(t, true); }
 
 function dragHandle(el, which) {
   el.addEventListener('pointerdown', (e) => {
@@ -159,11 +200,11 @@ $('set-end').onclick = () => { end = Math.max(player.getCurrentTime(), start + 0
 
 // ---------- playback controls ----------
 $('play-toggle').onclick = () => {
-  playingSelection = false;
+  playingSelection = false; cursor = null;
   player.getPlayerState() === YT.PlayerState.PLAYING ? player.pauseVideo() : player.playVideo();
 };
 $('play-sel').onclick = () => {
-  playingSelection = true;
+  playingSelection = true; cursor = null;
   player.seekTo(start, true);
   player.playVideo();
 };
@@ -172,7 +213,8 @@ setInterval(() => {
   if (!player || !duration || !player.getCurrentTime) return;
   const t = player.getCurrentTime();
   $('playhead').style.left = pct(t) + '%';
-  $('now').textContent = fmt(t);
+  $('now').textContent = fmt(cursor !== null ? Math.floor(cursor * fps + 1e-3) / fps : t, 2);
+  if (cursor !== null && (Math.abs(t - cursor) > 0.5 || player.getPlayerState() === YT.PlayerState.PLAYING)) cursor = null;
   if (playingSelection && t >= end) {
     if ($('loop').checked) player.seekTo(start, true);
     else { player.pauseVideo(); player.seekTo(end, true); playingSelection = false; }

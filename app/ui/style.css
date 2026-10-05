@@ -97,3 +97,4 @@ footer label.grow input { flex: 1; }
 #update-hint { color: #f0b429; }
 button.link { background: none; border: 1px solid #f0b429; color: #f0b429; padding: 1px 8px; font-size: 11px; margin-left: 4px; }
 button.link:hover:not(:disabled) { background: rgba(240, 180, 41, .15); }
+.hint-inline { color: var(--muted); font-size: 12px; margin-right: 10px; }

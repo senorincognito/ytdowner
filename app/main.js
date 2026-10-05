@@ -106,7 +106,25 @@ ipcMain.handle('ytdlp-latest', () => new Promise((resolve) => {
   req.on('timeout', () => { req.destroy(); resolve(null); });
 }));
 
-ipcMain.handle('ytdlp-install',async (event) => {
+// Frame rate of the video (YouTube's player API doesn't expose it). null if unknown.
+const fpsCache = new Map();
+ipcMain.handle('video-fps', (_e, id) => new Promise((resolve) => {
+  if (fpsCache.has(id)) return resolve(fpsCache.get(id));
+  if (!fs.existsSync(YTDLP)) return resolve(null);
+  let out = '';
+  const c = spawn(YTDLP, ['--no-playlist', '--skip-download', '--js-runtimes', 'node',
+    '--print', '%(fps)s', `https://www.youtube.com/watch?v=${id}`], { windowsHide: true });
+  c.stdout.on('data', (d) => { out += d; });
+  c.on('error', () => resolve(null));
+  c.on('close', () => {
+    const fps = parseFloat(out.trim());
+    const val = fps > 0 && fps <= 240 ? fps : null;
+    if (val) fpsCache.set(id, val);
+    resolve(val);
+  });
+}));
+
+ipcMain.handle('ytdlp-install', async (event) => {
   const part = YTDLP + '.part';
   try {
     fs.mkdirSync(BIN_DIR, { recursive: true });
