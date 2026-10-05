@@ -1,0 +1,13 @@
+{
+  "name": "ytdown",
+  "version": "1.0.0",
+  "description": "Download trimmed audio from YouTube videos",
+  "main": "app/main.js",
+  "scripts": {
+    "start": "node launch.js"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^44.5.1"
+  }
+}

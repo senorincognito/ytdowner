@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+
+# downloaded binaries (fetch from https://github.com/yt-dlp/yt-dlp/releases)
+bin/
+
+# build outputs
+dist/
+out/
+release/
+
+# logs / OS / editor
+*.log
+.DS_Store
+Thumbs.db

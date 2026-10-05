@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube Audio Trimmer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <input id="url" type="text" placeholder="Paste a youtube.com video URL…" spellcheck="false">
+    <button id="load" class="primary">Load</button>
+  </header>
+
+  <main>
+    <div id="player-wrap">
+      <div id="player"></div>
+      <div id="placeholder">Paste a link above to load a video</div>
+    </div>
+
+    <section id="trim" class="disabled">
+      <div id="timeline">
+        <div id="track">
+          <div id="range"></div>
+          <div id="playhead"></div>
+          <div class="handle" id="h-start" title="Start marker"></div>
+          <div class="handle" id="h-end" title="End marker"></div>
+        </div>
+      </div>
+
+      <div class="times">
+        <div class="field">
+          <label for="t-start">Start</label>
+          <input id="t-start" type="text" value="0:00.0">
+          <button id="set-start" title="Use current playback position">⤓ Set to now</button>
+        </div>
+        <div class="center">
+          <span id="now">0:00.0</span> / <span id="total">0:00.0</span>
+          <div id="sel-len">Selection: 0:00.0</div>
+        </div>
+        <div class="field right">
+          <button id="set-end" title="Use current playback position">⤓ Set to now</button>
+          <input id="t-end" type="text" value="0:00.0">
+          <label for="t-end">End</label>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button id="play-toggle">▶ Play / Pause</button>
+        <button id="play-sel">▶ Play selection</button>
+        <label class="check"><input type="checkbox" id="loop"> Loop selection</label>
+        <span class="hint">Drag a marker to scrub the preview · click the bar to seek</span>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="row">
+      <label>Format
+        <select id="format">
+          <option>mp3</option><option>m4a</option><option>opus</option><option>wav</option>
+        </select>
+      </label>
+      <label class="grow">Save to
+        <input id="folder" type="text" readonly>
+      </label>
+      <button id="browse">Browse…</button>
+    </div>
+    <div class="row">
+      <button id="download" class="primary big" disabled>Download audio</button>
+      <div class="status-wrap">
+        <div id="bar"><div id="bar-fill"></div></div>
+        <div id="status">Ready</div>
+      </div>
+      <button id="open-folder" hidden>Show folder</button>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
