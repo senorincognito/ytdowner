@@ -115,3 +115,8 @@ button.link:hover:not(:disabled) { background: rgba(240, 180, 41, .15); }
 #cancel { border-color: var(--accent-2); color: var(--accent-2); }
 .ext { color: var(--muted); font-variant-numeric: tabular-nums; }
 footer label.grow input#filename { color: var(--text); }
+
+/* drag & drop overlay (covers the YouTube iframe too, so the drop lands on the page) */
+#drop { position: fixed; inset: 0; z-index: 20; background: rgba(15, 18, 24, .88); display: grid; place-items: center; }
+#drop[hidden] { display: none; }
+#drop > div { border: 2px dashed var(--accent); border-radius: 14px; padding: 48px 64px; font-size: 18px; color: var(--text); }

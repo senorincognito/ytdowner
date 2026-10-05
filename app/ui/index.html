@@ -10,6 +10,7 @@
   <header>
     <input id="url" type="text" placeholder="Paste a video URL (YouTube or any site supported by yt-dlp)…" spellcheck="false">
     <button id="load" class="primary">Load</button>
+    <button id="open-file" title="Trim a local audio or video file (you can also drop one onto the window)">Open file…</button>
   </header>
 
   <main>
@@ -98,6 +99,8 @@
       <button id="update-ytdlp" title="Download the latest yt-dlp">Update yt-dlp</button>
     </div>
   </footer>
+
+  <div id="drop" hidden><div>Drop an audio or video file to trim it</div></div>
 
   <div id="modal" hidden>
     <div class="dialog">

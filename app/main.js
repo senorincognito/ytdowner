@@ -4,6 +4,7 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const path = require('path');
 
 const ROOT = __dirname;
@@ -20,6 +21,7 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
 function startServer() {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
+      if (req.url.startsWith('/local/')) return serveLocal(req, res);
       const name = req.url === '/' ? 'index.html' : path.basename(req.url.split('?')[0]);
       const file = path.join(ROOT, 'ui', name);
       fs.readFile(file, (err, data) => {
@@ -45,6 +47,8 @@ async function createWindow() {
   if (process.env.YTDOWN_DEBUG) {
     win.webContents.on('console-message', (_e, _l, msg) => console.log('[renderer]', msg));
   }
+  // A file dropped outside our drop handling would make the window navigate to it; never leave the app page.
+  win.webContents.on('will-navigate', (e, url) => { if (!url.startsWith(`http://127.0.0.1:${port}/`)) e.preventDefault(); });
   win.loadURL(`http://127.0.0.1:${port}/`);
 }
 
@@ -56,6 +60,90 @@ ipcMain.handle('choose-folder', async (_e, current) => {
 });
 
 ipcMain.handle('open-folder', (_e, folder) => shell.openPath(folder));
+
+// ---- local files: preview streaming, file dialog, probing ----
+const MEDIA_EXT = ['mp4', 'm4v', 'mov', 'mkv', 'webm', 'avi', 'wmv', 'flv', 'mpg', 'mpeg', 'ts', 'm2ts', '3gp',
+  'mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'oga', 'opus', 'wma', 'aiff', 'mka'];
+const MEDIA_MIME = {
+  '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mov': 'video/quicktime', '.mkv': 'video/x-matroska', '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.wav': 'audio/wav', '.flac': 'audio/flac',
+  '.ogg': 'audio/ogg', '.oga': 'audio/ogg', '.opus': 'audio/ogg',
+};
+
+// token -> absolute path. Only files the user picked or dropped are ever served to the page.
+const localFiles = new Map();
+
+function serveLocal(req, res) {
+  const p = localFiles.get(req.url.split('?')[0].slice('/local/'.length));
+  if (!p) { res.writeHead(404); res.end(); return; }
+  fs.stat(p, (err, st) => {
+    if (err || !st.isFile() || st.size === 0) { res.writeHead(404); res.end(); return; }
+    const size = st.size;
+    const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+    let s = 0, e = size - 1, status = 200;
+    if (m && (m[1] || m[2])) { // <video> seeks with Range requests
+      status = 206;
+      if (m[1] === '') s = Math.max(0, size - Number(m[2])); // suffix range: last N bytes
+      else { s = Number(m[1]); if (m[2] !== '') e = Math.min(e, Number(m[2])); }
+      if (s > e) { res.writeHead(416, { 'Content-Range': `bytes */${size}` }); res.end(); return; }
+    }
+    const headers = {
+      'Content-Type': MEDIA_MIME[path.extname(p).toLowerCase()] || 'application/octet-stream',
+      'Accept-Ranges': 'bytes',
+      'Content-Length': e - s + 1,
+    };
+    if (status === 206) headers['Content-Range'] = `bytes ${s}-${e}/${size}`;
+    res.writeHead(status, headers);
+    const rs = fs.createReadStream(p, { start: s, end: e });
+    rs.on('error', () => res.destroy());
+    res.on('close', () => rs.destroy());
+    rs.pipe(res);
+  });
+}
+
+ipcMain.handle('open-file', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    properties: ['openFile'],
+    filters: [{ name: 'Audio and video', extensions: MEDIA_EXT }, { name: 'All files', extensions: ['*'] }],
+  });
+  return r.canceled ? null : r.filePaths[0];
+});
+
+function probeFile(p) {
+  return new Promise((resolve) => {
+    let out = '', err = '';
+    const c = spawn('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', p], { windowsHide: true });
+    c.stdout.on('data', (d) => { out += d; });
+    c.stderr.on('data', (d) => { err += d; });
+    c.on('error', () => resolve({ ok: false, error: 'ffprobe was not found. It ships with ffmpeg – make sure ffmpeg is installed and on your PATH.' }));
+    c.on('close', () => {
+      let j;
+      try { j = JSON.parse(out); } catch { j = null; }
+      if (!j) return resolve({ ok: false, error: err.trim().split('\n').pop() || 'This file could not be read.' });
+      const streams = j.streams || [];
+      const video = streams.find((s) => s.codec_type === 'video' && !s.disposition?.attached_pic); // skip cover art
+      const hasAudio = streams.some((s) => s.codec_type === 'audio');
+      if (!video && !hasAudio) return resolve({ ok: false, error: 'No audio or video stream found in this file.' });
+      const rate = (str) => { const [a, b] = String(str || '').split('/').map(Number); return b ? a / b : a; };
+      const fps = video ? [rate(video.avg_frame_rate), rate(video.r_frame_rate)].find((f) => f > 0 && f <= 240) || null : null;
+      const duration = Number(j.format?.duration) || Math.max(0, ...streams.map((s) => Number(s.duration) || 0));
+      resolve({ ok: true, duration, fps: fps ? Math.round(fps * 100) / 100 : null, hasVideo: !!video, hasAudio });
+    });
+  });
+}
+
+// Validates a picked/dropped file, probes it and makes it playable in the preview.
+ipcMain.handle('prepare-file', async (_e, p) => {
+  let st;
+  try { st = fs.statSync(p); } catch { return { ok: false, error: 'File not found.' }; }
+  if (!st.isFile()) return { ok: false, error: 'That is not a file.' };
+  const info = await probeFile(p);
+  if (!info.ok) return info;
+  const token = crypto.randomUUID();
+  localFiles.set(token, p);
+  return { ...info, path: p, title: path.basename(p, path.extname(p)), streamUrl: `/local/${token}` };
+});
+
 
 function ytdlpVersion() {
   return new Promise((resolve) => {
@@ -232,10 +320,16 @@ function sanitizeName(n) {
   return s;
 }
 
-ipcMain.handle('download', async (event, { url, kind, start, end, duration, format, height, folder, name, overwrite }) => {
+const sameFile = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+const SOURCE_CLASH = 'The output would overwrite the source file – choose a different name or folder.';
+
+// `localPath` set = trim a file from disk: no yt-dlp, just the ffmpeg cut/encode step.
+ipcMain.handle('download', async (event, { url, file: localPath, kind, start, end, duration, format, height, folder, name, overwrite }) => {
   if (activeDownload) return { ok: false, error: 'A download is already running.' };
+  const local = !!localPath;
   const cleanName = sanitizeName(name);
   const target = cleanName ? path.join(folder, `${cleanName}.${format}`) : null;
+  if (local && target && sameFile(target, localPath)) return { ok: false, error: SOURCE_CLASH };
   if (target && !overwrite && fs.existsSync(target)) return { ok: false, exists: true, file: target };
   const job = activeDownload = { child: null, cancelled: false };
   const win = BrowserWindow.fromWebContents(event.sender);
@@ -247,81 +341,86 @@ ipcMain.handle('download', async (event, { url, kind, start, end, duration, form
   };
 
   const trimmed = start != null || end != null;
-  const clipLen = trimmed ? (end ?? duration ?? 0) - (start ?? 0) : 0;
-  let streams = kind === 'video' ? 2 : 1; // yt-dlp tells us the real number once it has picked formats
+  const clipLen = trimmed || local ? (end ?? duration ?? 0) - (start ?? 0) : 0;
+  let streams = local ? 0 : kind === 'video' ? 2 : 1; // yt-dlp tells us the real number once it has picked formats
   let stream = 0;
-  const steps = () => streams + (trimmed ? 1 : 0); // one extra step for the local cut
+  const steps = () => streams + (trimmed || local ? 1 : 0); // one extra step for the local cut
   const dests = [];
-  let file = '', tmpDir = null, outFile = null;
+  let file = local ? localPath : '', tmpDir = null, outFile = null;
 
   try {
     send({ stage: 'preparing' });
-    tmpDir = trimmed ? fs.mkdtempSync(path.join(os.tmpdir(), 'ytdown-')) : null;
+    tmpDir = trimmed && !local ? fs.mkdtempSync(path.join(os.tmpdir(), 'ytdown-')) : null;
 
-    // ---- step 1..n: yt-dlp ----
-    const args = [
-      // --print implies --quiet, which would hide all progress/stage lines we parse below
-      '--no-playlist', '--newline', '--no-quiet', '--progress', '--js-runtimes', 'node',
-      '--progress-template', 'download:PROGRESS %(progress._percent_str)s|%(progress.speed)s|%(progress.eta)s',
-      '--print', 'after_move:FILE %(filepath)s',
-      // trimmed runs land in a temp folder and are renamed by the cut step; otherwise this is the final name
-      // (% must be doubled to survive yt-dlp's output template)
-      '-o', path.join(tmpDir ?? folder, `${!tmpDir && cleanName ? cleanName.replace(/%/g, '%%') : '%(title)s'}.%(ext)s`),
-    ];
-    if (overwrite) args.push('--force-overwrites');
-    const res = `res:${Number(height) || 4320},ext`; // -S ext prefers mp4/m4a streams so merging is a cheap remux
-    if (trimmed) {
-      if (kind === 'video') args.push('-f', 'bv*+ba/b', '-S', res, '--merge-output-format', 'mkv'); // mkv holds anything
-      else args.push('-f', 'ba/b');
-    } else if (kind === 'video') {
-      // --remux-video guarantees the chosen container even when the site serves one pre-merged file
-      args.push('-f', 'bv*+ba/b', '-S', res, '--merge-output-format', format, '--remux-video', format);
-    } else {
-      args.push('-x', '--audio-format', format, '--audio-quality', '0');
-    }
-    args.push(url);
-
-    const onYtdlpLine = (line) => {
-      line = line.trim();
-      let m;
-      if (line.startsWith('PROGRESS')) {
-        const [pctStr, speed, eta] = line.slice(8).split('|');
-        const pct = parseFloat(pctStr);
-        if (isNaN(pct)) return;
-        const n = Math.max(stream, 1);
-        send({
-          stage: 'downloading',
-          percent: ((n - 1 + pct / 100) / steps()) * 100,
-          step: steps() > 1 ? { n, of: steps() } : null,
-          speed: parseFloat(speed) || null,
-          eta: steps() === 1 ? (parseFloat(eta) || null) : null,
-        });
-      } else if (line.startsWith('FILE ')) {
-        file = line.slice(5);
-      } else if ((m = /Downloading \d+ format\(s\):\s*(\S+)/.exec(line))) {
-        streams = m[1].split('+').length;
-      } else if (line.startsWith('[download] Destination:')) {
-        stream++;
-        dests.push(line.slice('[download] Destination:'.length).trim());
-      } else if (/^\[(ExtractAudio|Merger|VideoRemuxer|VideoConvertor|Fixup\w*|ffmpeg)\]/.test(line)) {
-        send({ stage: 'converting' });
+    // ---- step 1..n: yt-dlp (skipped for local files) ----
+    if (!local) {
+      const args = [
+        // --print implies --quiet, which would hide all progress/stage lines we parse below
+        '--no-playlist', '--newline', '--no-quiet', '--progress', '--js-runtimes', 'node',
+        '--progress-template', 'download:PROGRESS %(progress._percent_str)s|%(progress.speed)s|%(progress.eta)s',
+        '--print', 'after_move:FILE %(filepath)s',
+        // trimmed runs land in a temp folder and are renamed by the cut step; otherwise this is the final name
+        // (% must be doubled to survive yt-dlp's output template)
+        '-o', path.join(tmpDir ?? folder, `${!tmpDir && cleanName ? cleanName.replace(/%/g, '%%') : '%(title)s'}.%(ext)s`),
+      ];
+      if (overwrite) args.push('--force-overwrites');
+      const res = `res:${Number(height) || 4320},ext`; // -S ext prefers mp4/m4a streams so merging is a cheap remux
+      if (trimmed) {
+        if (kind === 'video') args.push('-f', 'bv*+ba/b', '-S', res, '--merge-output-format', 'mkv'); // mkv holds anything
+        else args.push('-f', 'ba/b');
+      } else if (kind === 'video') {
+        // --remux-video guarantees the chosen container even when the site serves one pre-merged file
+        args.push('-f', 'bv*+ba/b', '-S', res, '--merge-output-format', format, '--remux-video', format);
+      } else {
+        args.push('-x', '--audio-format', format, '--audio-quality', '0');
       }
-    };
-    const dl = await runChild(job, YTDLP, args, onYtdlpLine);
-    if (job.cancelled) throw Object.assign(new Error('cancelled'), { cancelled: true });
-    if (dl.code !== 0) return { ok: false, error: lastError(dl.err, dl.code === -1 ? dl.err : `yt-dlp exited with ${dl.code}`) };
-    if (!trimmed) return { ok: true, file };
-    if (!file) return { ok: false, error: 'yt-dlp did not report the downloaded file.' };
+      args.push(url);
+
+      const onYtdlpLine = (line) => {
+        line = line.trim();
+        let m;
+        if (line.startsWith('PROGRESS')) {
+          const [pctStr, speed, eta] = line.slice(8).split('|');
+          const pct = parseFloat(pctStr);
+          if (isNaN(pct)) return;
+          const n = Math.max(stream, 1);
+          send({
+            stage: 'downloading',
+            percent: ((n - 1 + pct / 100) / steps()) * 100,
+            step: steps() > 1 ? { n, of: steps() } : null,
+            speed: parseFloat(speed) || null,
+            eta: steps() === 1 ? (parseFloat(eta) || null) : null,
+          });
+        } else if (line.startsWith('FILE ')) {
+          file = line.slice(5);
+        } else if ((m = /Downloading \d+ format\(s\):\s*(\S+)/.exec(line))) {
+          streams = m[1].split('+').length;
+        } else if (line.startsWith('[download] Destination:')) {
+          stream++;
+          dests.push(line.slice('[download] Destination:'.length).trim());
+        } else if (/^\[(ExtractAudio|Merger|VideoRemuxer|VideoConvertor|Fixup\w*|ffmpeg)\]/.test(line)) {
+          send({ stage: 'converting' });
+        }
+      };
+      const dl = await runChild(job, YTDLP, args, onYtdlpLine);
+      if (job.cancelled) throw Object.assign(new Error('cancelled'), { cancelled: true });
+      if (dl.code !== 0) return { ok: false, error: lastError(dl.err, dl.code === -1 ? dl.err : `yt-dlp exited with ${dl.code}`) };
+      if (!trimmed) return { ok: true, file };
+      if (!file) return { ok: false, error: 'yt-dlp did not report the downloaded file.' };
+    }
 
     // ---- last step: cut + encode locally ----
-    const base = cleanName || path.basename(file, path.extname(file));
+    const base = cleanName || path.basename(file, path.extname(file)) + (local ? ' (trimmed)' : '');
     fs.mkdirSync(folder, { recursive: true }); // yt-dlp would create it; here ffmpeg writes the output
     outFile = path.join(folder, `${base}.${format}`);
-    const ff = ['-y', '-hide_banner', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1',
-      '-ss', String(start ?? 0), '-i', file];
+    if (local && sameFile(outFile, localPath)) { outFile = null; return { ok: false, error: SOURCE_CLASH }; }
+    const ff = ['-y', '-hide_banner', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1'];
+    if (start != null) ff.push('-ss', String(start));
+    ff.push('-i', file);
     if (end != null) ff.push('-t', String(clipLen));
     if (kind === 'video') {
-      ff.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-c:a', 'aac', '-b:a', '192k');
+      if (height) ff.push('-vf', `scale=-2:'min(ih,${Number(height)})'`); // cap the height, keep the aspect ratio
+      ff.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k');
       if (format === 'mp4') ff.push('-movflags', '+faststart');
     } else {
       ff.push('-vn', ...AUDIO_CODEC[format]);
@@ -340,7 +439,7 @@ ipcMain.handle('download', async (event, { url, kind, start, end, duration, form
         send({
           stage: 'downloading',
           percent: ((steps() - 1 + frac) / steps()) * 100,
-          step: { n: steps(), of: steps() },
+          step: steps() > 1 ? { n: steps(), of: steps() } : null,
           trim: true,
           eta: speedX > 0 ? Math.max(0, clipLen - outSec) / speedX : null,
         });

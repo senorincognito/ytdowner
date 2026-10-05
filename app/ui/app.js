@@ -5,6 +5,7 @@ let duration = 0;
 let start = 0;
 let end = 0;
 let currentUrl = null;
+let currentFile = null; // set instead of currentUrl when trimming a local file
 let playingSelection = false;
 let downloading = false;
 let loadToken = 0;
@@ -177,10 +178,74 @@ function setFps(f) {
   $('fps').textContent = f ? `${+f.toFixed(2)} fps` : '30 fps (assumed)';
 }
 
+// Common end of every successful load (online video or local file).
+function showLoaded(len, title, defaultName) {
+  duration = len;
+  start = 0;
+  end = len;
+  $('total').textContent = fmt(len);
+  $('trim').classList.remove('disabled');
+  $('download').disabled = downloading;
+  setStatus(title ? `Ready – ${title}` : 'Ready – set your start and end markers');
+  setDefaultName(defaultName);
+  render();
+}
+
+// Audio-only files have no video to export.
+function setKindCaps(hasVideo) {
+  $('kind').querySelector('option[value="video"]').disabled = !hasVideo;
+  if (!hasVideo && $('kind').value === 'video') { $('kind').value = 'audio'; applyKind(); }
+  updateActionLabel();
+}
+
+async function loadLocalFile(p) {
+  const token = ++loadToken;
+  const stale = () => token !== loadToken;
+  currentUrl = null;
+  currentFile = p;
+  $('url').value = p;
+  setDefaultName('');
+  duration = 0;
+  playingSelection = false;
+  cursor = null;
+  $('trim').classList.add('disabled');
+  $('download').disabled = true;
+  $('player-wrap').classList.add('loaded');
+  setStatus('Reading file…');
+  updateActionLabel();
+
+  try {
+    const meta = await api.prepareFile(p);
+    if (stale()) return;
+    if (!meta.ok) throw new Error(meta.error);
+    setKindCaps(meta.hasVideo);
+
+    let info = null;
+    setMode('html5');
+    try {
+      info = await html5.load(meta.streamUrl);
+      if (!meta.hasVideo) $('player-msg').textContent = 'Audio only';
+    } catch { if (stale()) return; }
+    if (!info) { // the browser engine can't play this codec/container; trimming still works
+      if (!(meta.duration > 0)) throw new Error('Could not determine the length of this file.');
+      setMode('none', 'No preview available for this file – type the start and end times below.');
+      info = { duration: meta.duration };
+    }
+    if (stale()) return;
+
+    showLoaded(info.duration, meta.title, `${meta.title} (trimmed)`);
+    setFps(meta.fps);
+  } catch (e) {
+    if (!stale()) setStatus(e.message, 'error');
+  }
+}
+
 async function loadVideo(url) {
   const token = ++loadToken;
   const stale = () => token !== loadToken;
   currentUrl = url;
+  currentFile = null;
+  setKindCaps(true);
   setDefaultName('');
   duration = 0;
   playingSelection = false;
@@ -226,16 +291,8 @@ async function loadVideo(url) {
     }
     if (stale()) return;
 
-    duration = info.duration;
-    start = 0;
-    end = duration;
-    $('total').textContent = fmt(duration);
-    $('trim').classList.remove('disabled');
-    $('download').disabled = downloading;
     const title = meta.title || (ytId && !meta.ok ? yt.title() : '');
-    setStatus(title ? `Ready – ${title}` : 'Ready – set your start and end markers');
-    setDefaultName(title);
-    render();
+    showLoaded(info.duration, title, title);
 
     if (ytId && !meta.ok) { // YouTube embed: the player API has no fps, ask yt-dlp in the background
       setFps(null);
@@ -362,10 +419,36 @@ setInterval(() => {
 }, 80);
 
 function onLoad() {
-  const url = $('url').value.trim();
-  if (!/^https?:\/\/\S+$/i.test(url)) { setStatus('Please enter a valid video URL (starting with http:// or https://).', 'error'); return; }
+  const url = $('url').value.trim().replace(/^"(.*)"$/, '$1'); // "Copy as path" adds quotes
+  if (/^(?:[a-zA-Z]:[\\/]|\\\\)/.test(url)) { loadLocalFile(url); return; } // a pasted file path
+  if (!/^https?:\/\/\S+$/i.test(url)) { setStatus('Please enter a valid video URL (starting with http:// or https://) or a file path.', 'error'); return; }
   loadVideo(url);
 }
+
+// ---------- local files: picker + drag & drop ----------
+$('open-file').onclick = async () => {
+  const p = await api.openFile();
+  if (p) loadLocalFile(p);
+};
+
+let dragDepth = 0;
+const dragHasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+window.addEventListener('dragenter', (e) => { if (dragHasFiles(e)) { dragDepth++; $('drop').hidden = false; } });
+window.addEventListener('dragleave', (e) => { if (dragHasFiles(e) && --dragDepth <= 0) { dragDepth = 0; $('drop').hidden = true; } });
+window.addEventListener('dragover', (e) => e.preventDefault()); // without this the page refuses drops
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  $('drop').hidden = true;
+  const file = e.dataTransfer.files[0];
+  if (file) {
+    const p = api.pathForFile(file);
+    if (p) loadLocalFile(p); else setStatus('Could not read the path of the dropped file.', 'error');
+    return;
+  }
+  const link = (e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain') || '').trim();
+  if (/^https?:\/\/\S+$/i.test(link)) { $('url').value = link; onLoad(); } // dropped a link
+});
 $('load').onclick = onLoad;
 $('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') onLoad(); });
 
@@ -378,8 +461,11 @@ function applyKind() {
   $('format').innerHTML = FORMATS[kind].map((f) => `<option>${f}</option>`).join('');
   $('format').value = lastFormat[kind];
   $('quality-label').hidden = kind !== 'video';
-  $('download').textContent = `Download ${kind}`;
+  updateActionLabel();
   $('ext').textContent = `.${$('format').value}`;
+}
+function updateActionLabel() {
+  $('download').textContent = `${currentFile ? 'Save' : 'Download'} ${$('kind').value}`;
 }
 $('kind').onchange = applyKind;
 $('format').onchange = () => { lastFormat[$('kind').value] = $('format').value; $('ext').textContent = `.${$('format').value}`; };
@@ -430,7 +516,7 @@ function tickPhase() {
 function stopPhase() { phase = null; }
 
 api.onProgress((m) => {
-  if (m.stage === 'preparing') startPhase('Preparing – finding the stream…');
+  if (m.stage === 'preparing') startPhase(currentFile ? 'Preparing…' : 'Preparing – finding the stream…');
   else if (m.stage === 'converting') startPhase('Converting / merging…');
   else if (m.stage === 'downloading') {
     stopPhase();
@@ -451,8 +537,8 @@ $('cancel').onclick = async () => {
 };
 
 $('download').onclick = async () => {
-  if (!currentUrl || downloading) return;
-  if (!ytdlpInstalled) { showModal(INSTALL_TEXT); return; }
+  if ((!currentUrl && !currentFile) || downloading) return;
+  if (currentUrl && !ytdlpInstalled) { showModal(INSTALL_TEXT); return; } // local files only need ffmpeg
   downloading = true;
   $('download').disabled = true;
   $('open-folder').hidden = true;
@@ -464,6 +550,7 @@ $('download').onclick = async () => {
   const trimmed = start > 0.05 || end < duration - 0.05;
   const payload = {
     url: currentUrl,
+    file: currentFile,
     start: trimmed ? start : null,
     end: trimmed ? end : null,
     duration,
