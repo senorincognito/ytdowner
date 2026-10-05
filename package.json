@@ -4,10 +4,40 @@
   "description": "Download trimmed audio from YouTube videos",
   "main": "app/main.js",
   "scripts": {
-    "start": "node launch.js"
+    "start": "node launch.js",
+    "build": "electron-builder --win",
+    "build:dir": "electron-builder --win --dir"
   },
   "license": "MIT",
   "devDependencies": {
-    "electron": "^44.5.1"
-  }
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.ytdown.app",
+    "productName": "YouTube Audio Trimmer",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "app/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}"
+    }
+  },
+  "author": "Eugen"
 }

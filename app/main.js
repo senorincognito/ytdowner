@@ -6,8 +6,9 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = __dirname;
-// Local/dev builds keep the binary in <project>/bin.
-const BIN_DIR = path.join(ROOT, '..', 'bin');
+// Local/dev runs keep the binary in <project>/bin; packaged builds can't write next to the (read-only)
+// app archive, so they use the per-user data folder instead.
+const BIN_DIR = app.isPackaged ? path.join(app.getPath('userData'), 'bin') : path.join(ROOT, '..', 'bin');
 const YTDLP = path.join(BIN_DIR, 'yt-dlp.exe');
 const YTDLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe';
 
