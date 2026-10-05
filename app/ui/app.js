@@ -153,6 +153,7 @@ const yt = {
   },
   time() { return this.ready ? this.player.getCurrentTime() : 0; },
   playing() { return this.ready && this.player.getPlayerState() === YT.PlayerState.PLAYING; },
+  title() { return (this.ready && this.player.getVideoData?.()?.title) || ''; },
 };
 
 // Clicking the YouTube player gives the cross-origin iframe keyboard focus, so the page would never see
@@ -180,6 +181,7 @@ async function loadVideo(url) {
   const token = ++loadToken;
   const stale = () => token !== loadToken;
   currentUrl = url;
+  setDefaultName('');
   duration = 0;
   playingSelection = false;
   cursor = null;
@@ -230,7 +232,9 @@ async function loadVideo(url) {
     $('total').textContent = fmt(duration);
     $('trim').classList.remove('disabled');
     $('download').disabled = downloading;
-    setStatus(meta.title ? `Ready – ${meta.title}` : 'Ready – set your start and end markers');
+    const title = meta.title || (ytId && !meta.ok ? yt.title() : '');
+    setStatus(title ? `Ready – ${title}` : 'Ready – set your start and end markers');
+    setDefaultName(title);
     render();
 
     if (ytId && !meta.ok) { // YouTube embed: the player API has no fps, ask yt-dlp in the background
@@ -375,9 +379,16 @@ function applyKind() {
   $('format').value = lastFormat[kind];
   $('quality-label').hidden = kind !== 'video';
   $('download').textContent = `Download ${kind}`;
+  $('ext').textContent = `.${$('format').value}`;
 }
 $('kind').onchange = applyKind;
-$('format').onchange = () => { lastFormat[$('kind').value] = $('format').value; };
+$('format').onchange = () => { lastFormat[$('kind').value] = $('format').value; $('ext').textContent = `.${$('format').value}`; };
+
+// File name: prefilled from the video title, freely editable. Empty = let yt-dlp use the title.
+function safeName(s) {
+  return s.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '').slice(0, 150);
+}
+function setDefaultName(title) { $('filename').value = safeName(title || ''); }
 applyKind();
 
 // ---------- download ----------
@@ -451,7 +462,7 @@ $('download').onclick = async () => {
   phaseTimer = setInterval(tickPhase, 1000);
 
   const trimmed = start > 0.05 || end < duration - 0.05;
-  const result = await api.download({
+  const payload = {
     url: currentUrl,
     start: trimmed ? start : null,
     end: trimmed ? end : null,
@@ -460,7 +471,15 @@ $('download').onclick = async () => {
     format: $('format').value,
     height: Number($('quality').value),
     folder: $('folder').value,
-  });
+    name: $('filename').value,
+  };
+  let result = await api.download(payload);
+  if (result.exists) { // the chosen file name is taken: ask before replacing it
+    const existing = result.file.split(/[\\/]/).pop();
+    result = confirm(`"${existing}" already exists in this folder.\n\nOverwrite it?`)
+      ? await api.download({ ...payload, overwrite: true })
+      : { ok: false, cancelled: true };
+  }
 
   downloading = false;
   clearInterval(phaseTimer);

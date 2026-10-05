@@ -225,8 +225,18 @@ const lastError = (text, fallback) =>
 //  - Trimmed: ffmpeg seeking over YouTube's HTTP streams stalls for anything but tiny files, so yt-dlp first
 //    downloads the full stream(s) into a temp folder (fast, native downloader) and ffmpeg then cuts + encodes
 //    the local file, which also gives exact progress.
-ipcMain.handle('download', async (event, { url, kind, start, end, duration, format, height, folder }) => {
+// A safe Windows file name stem (no extension). Empty means "use the video title".
+function sanitizeName(n) {
+  let s = String(n ?? '').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '').slice(0, 150);
+  if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(s)) s = '_' + s;
+  return s;
+}
+
+ipcMain.handle('download', async (event, { url, kind, start, end, duration, format, height, folder, name, overwrite }) => {
   if (activeDownload) return { ok: false, error: 'A download is already running.' };
+  const cleanName = sanitizeName(name);
+  const target = cleanName ? path.join(folder, `${cleanName}.${format}`) : null;
+  if (target && !overwrite && fs.existsSync(target)) return { ok: false, exists: true, file: target };
   const job = activeDownload = { child: null, cancelled: false };
   const win = BrowserWindow.fromWebContents(event.sender);
   const send = (msg) => {
@@ -254,14 +264,18 @@ ipcMain.handle('download', async (event, { url, kind, start, end, duration, form
       '--no-playlist', '--newline', '--no-quiet', '--progress', '--js-runtimes', 'node',
       '--progress-template', 'download:PROGRESS %(progress._percent_str)s|%(progress.speed)s|%(progress.eta)s',
       '--print', 'after_move:FILE %(filepath)s',
-      '-o', path.join(tmpDir ?? folder, '%(title)s.%(ext)s'),
+      // trimmed runs land in a temp folder and are renamed by the cut step; otherwise this is the final name
+      // (% must be doubled to survive yt-dlp's output template)
+      '-o', path.join(tmpDir ?? folder, `${!tmpDir && cleanName ? cleanName.replace(/%/g, '%%') : '%(title)s'}.%(ext)s`),
     ];
+    if (overwrite) args.push('--force-overwrites');
     const res = `res:${Number(height) || 4320},ext`; // -S ext prefers mp4/m4a streams so merging is a cheap remux
     if (trimmed) {
       if (kind === 'video') args.push('-f', 'bv*+ba/b', '-S', res, '--merge-output-format', 'mkv'); // mkv holds anything
       else args.push('-f', 'ba/b');
     } else if (kind === 'video') {
-      args.push('-f', 'bv*+ba/b', '-S', res, '--merge-output-format', format);
+      // --remux-video guarantees the chosen container even when the site serves one pre-merged file
+      args.push('-f', 'bv*+ba/b', '-S', res, '--merge-output-format', format, '--remux-video', format);
     } else {
       args.push('-x', '--audio-format', format, '--audio-quality', '0');
     }
@@ -300,7 +314,7 @@ ipcMain.handle('download', async (event, { url, kind, start, end, duration, form
     if (!file) return { ok: false, error: 'yt-dlp did not report the downloaded file.' };
 
     // ---- last step: cut + encode locally ----
-    const base = path.basename(file, path.extname(file));
+    const base = cleanName || path.basename(file, path.extname(file));
     fs.mkdirSync(folder, { recursive: true }); // yt-dlp would create it; here ffmpeg writes the output
     outFile = path.join(folder, `${base}.${format}`);
     const ff = ['-y', '-hide_banner', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1',
