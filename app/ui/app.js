@@ -36,6 +36,7 @@ function setStatus(text, cls = '') {
 }
 
 // ---------- YouTube player ----------
+let playerReady = false;
 let apiReady = new Promise((resolve) => { window.onYouTubeIframeAPIReady = resolve; });
 const tag = document.createElement('script');
 tag.src = 'https://www.youtube.com/iframe_api';
@@ -48,20 +49,31 @@ async function loadVideo(id) {
   $('trim').classList.add('disabled');
   $('download').disabled = true;
   setStatus('Loading video…');
-  if (player) { player.loadVideoById(id); player.pauseVideo(); return; }
+  playingSelection = false; pauseOnPlay = false; cursor = null;
+  if (player) {
+    // cue (not load) so nothing autoplays; works for the same id too. Before onReady the player has no
+    // methods yet - onReady picks up currentId instead.
+    if (playerReady) { player.cueVideoById(id); waitForDuration(); }
+    return;
+  }
   player = new YT.Player('player', {
     videoId: id,
     width: '100%', height: '100%',
-    playerVars: { rel: 0, playsinline: 1, origin: location.origin },
+    // disablekb: turn off YouTube's own keyboard shortcuts (they clash with the app's arrow keys)
+    playerVars: { rel: 0, playsinline: 1, disablekb: 1, origin: location.origin },
     events: {
-      onReady: () => waitForDuration(),
+      onReady: () => {
+        playerReady = true;
+        if (player.getVideoData?.()?.video_id !== currentId) player.cueVideoById(currentId);
+        waitForDuration();
+      },
       onStateChange: (e) => {
-        if (e.data === YT.PlayerState.PLAYING && !duration) waitForDuration();
         if (e.data === YT.PlayerState.PLAYING && pauseOnPlay) { // finish a frame step on a never-started player
           pauseOnPlay = false; player.pauseVideo(); if (cursor !== null) player.seekTo(cursor, true);
         }
       },
       onError: (e) => {
+        durationPoll++;
         const msgs = { 2: 'Invalid video ID.', 5: 'Player error.', 100: 'Video not found or private.',
                        101: 'The owner disabled embedding for this video.', 150: 'The owner disabled embedding for this video.',
                        153: 'Embedding blocked (player configuration error).' };
@@ -107,10 +119,21 @@ window.addEventListener('keydown', (e) => {
   stepFrame(e.key === 'ArrowLeft' ? -1 : 1);
 });
 
+let durationPoll = 0;
+// Clicking the player gives the cross-origin iframe keyboard focus, so the page would never see the arrow
+// keys. Hand focus straight back to the page.
+window.addEventListener('blur', () => setTimeout(() => {
+  if (document.activeElement && document.activeElement.tagName === 'IFRAME') document.activeElement.blur();
+}, 0));
+
 function waitForDuration() {
+  const mine = ++durationPoll; // a newer load cancels older polls
+  const began = Date.now();
   const tick = () => {
+    if (mine !== durationPoll) return;
     const d = player.getDuration && player.getDuration();
-    if (d > 0) {
+    const loaded = player.getVideoData?.()?.video_id === currentId;
+    if (d > 0 && loaded) {
       duration = d;
       start = 0; end = d;
       $('total').textContent = fmt(d);
@@ -119,6 +142,8 @@ function waitForDuration() {
       setStatus('Ready — set your start and end markers');
       render();
       loadFps(currentId);
+    } else if (Date.now() - began > 20000) {
+      setStatus('Could not load the video (timed out).', 'error');
     } else setTimeout(tick, 200);
   };
   tick();
