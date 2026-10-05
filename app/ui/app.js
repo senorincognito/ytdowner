@@ -1,12 +1,15 @@
 const $ = (id) => document.getElementById(id);
 
-let player = null;
+let pl = null; // active preview adapter: yt | html5 | noPreview
 let duration = 0;
 let start = 0;
 let end = 0;
-let currentId = null;
+let currentUrl = null;
 let playingSelection = false;
 let downloading = false;
+let loadToken = 0;
+let fps = 30;
+let cursor = null; // last frame-step target; the player's current time can lag right after a seek
 
 // ---------- time helpers ----------
 function fmt(sec, digits = 1) {
@@ -35,80 +38,218 @@ function setStatus(text, cls = '') {
   $('status').className = cls;
 }
 
-// ---------- YouTube player ----------
-let playerReady = false;
-let apiReady = new Promise((resolve) => { window.onYouTubeIframeAPIReady = resolve; });
+// ---------- preview adapters ----------
+// Every adapter offers: play(), pause(), seek(t), seekPaused(t), time(), playing().
+// yt and html5 also have load(src) -> Promise<{ duration }>.
+
+// Used when a video can be downloaded but not played in the app: the timeline still works.
+const noPreview = { play() {}, pause() {}, seek() {}, seekPaused() {}, time: () => 0, playing: () => false };
+
+// Plain HTML5 <video> for direct stream URLs resolved by yt-dlp (any supported site).
+const html5 = {
+  el: $('video'),
+  load(src) {
+    const v = this.el;
+    return new Promise((resolve, reject) => {
+      const done = (fn, arg) => { clearTimeout(timer); v.onloadedmetadata = v.onerror = null; fn(arg); };
+      const timer = setTimeout(() => done(reject, new Error('The stream took too long to load.')), 20000);
+      v.onloadedmetadata = () => (isFinite(v.duration) && v.duration > 0
+        ? done(resolve, { duration: v.duration, audioOnly: v.videoWidth === 0 })
+        : done(reject, new Error('The stream has no known duration.')));
+      v.onerror = () => done(reject, new Error('This stream cannot be played in the preview.'));
+      v.src = src;
+      v.load();
+    });
+  },
+  unload() { this.el.pause(); this.el.removeAttribute('src'); this.el.load(); },
+  play() { this.el.play().catch(() => {}); },
+  pause() { this.el.pause(); },
+  seek(t) { this.el.currentTime = t; },
+  seekPaused(t) { this.el.pause(); this.el.currentTime = t; },
+  time() { return this.el.currentTime; },
+  playing() { return !this.el.paused && !this.el.ended; },
+};
+$('video').addEventListener('click', () => { playingSelection = false; cursor = null; html5.playing() ? html5.pause() : html5.play(); });
+
+// YouTube's embedded player (official IFrame API).
+const apiReady = new Promise((resolve) => { window.onYouTubeIframeAPIReady = resolve; });
 const tag = document.createElement('script');
 tag.src = 'https://www.youtube.com/iframe_api';
 document.head.appendChild(tag);
 
-async function loadVideo(id) {
-  await apiReady;
-  currentId = id;
-  duration = 0;
-  $('trim').classList.add('disabled');
-  $('download').disabled = true;
-  setStatus('Loading video…');
-  playingSelection = false; pauseOnPlay = false; cursor = null;
-  if (player) {
-    // cue (not load) so nothing autoplays; works for the same id too. Before onReady the player has no
-    // methods yet - onReady picks up currentId instead.
-    if (playerReady) { player.cueVideoById(id); waitForDuration(); }
-    return;
-  }
-  player = new YT.Player('player', {
-    videoId: id,
-    width: '100%', height: '100%',
-    // disablekb: turn off YouTube's own keyboard shortcuts (they clash with the app's arrow keys)
-    playerVars: { rel: 0, playsinline: 1, disablekb: 1, origin: location.origin },
-    events: {
-      onReady: () => {
-        playerReady = true;
-        if (player.getVideoData?.()?.video_id !== currentId) player.cueVideoById(currentId);
-        waitForDuration();
+const YT_ERRORS = { 2: 'Invalid video ID.', 5: 'Player error.', 100: 'Video not found or private.',
+  101: 'The owner disabled embedding for this video.', 150: 'The owner disabled embedding for this video.',
+  153: 'Embedding blocked (player configuration error).' };
+const EMBED_BLOCKED = [101, 150, 153];
+
+const yt = {
+  player: null, ready: false, videoId: null, waiter: null, poll: 0, pauseOnPlay: false,
+
+  async load(id) {
+    await apiReady;
+    return new Promise((resolve, reject) => {
+      this.videoId = id;
+      this.waiter = { resolve, reject };
+      this.pauseOnPlay = false;
+      if (!this.player) this.create(id);
+      // cue (not load) so nothing autoplays; works for the same id too. Before onReady the player has no
+      // methods yet - onReady picks up this.videoId instead.
+      else if (this.ready) { this.player.cueVideoById(id); this.waitDuration(); }
+    });
+  },
+
+  create(id) {
+    this.player = new YT.Player('player', {
+      videoId: id,
+      width: '100%', height: '100%',
+      // disablekb: turn off YouTube's own keyboard shortcuts (they clash with the app's arrow keys)
+      playerVars: { rel: 0, playsinline: 1, disablekb: 1, origin: location.origin },
+      events: {
+        onReady: () => {
+          this.ready = true;
+          if (this.player.getVideoData?.()?.video_id !== this.videoId) this.player.cueVideoById(this.videoId);
+          this.waitDuration();
+        },
+        onStateChange: (e) => {
+          if (e.data === YT.PlayerState.PLAYING && this.pauseOnPlay) { // finish a frame step on a never-started player
+            this.pauseOnPlay = false; this.player.pauseVideo(); if (cursor !== null) this.player.seekTo(cursor, true);
+          }
+        },
+        onError: (e) => {
+          const msg = YT_ERRORS[e.data] || `Player error ${e.data}`;
+          if (this.waiter) this.fail(Object.assign(new Error(msg), { code: e.data }));
+          else setStatus(msg, 'error');
+        },
       },
-      onStateChange: (e) => {
-        if (e.data === YT.PlayerState.PLAYING && pauseOnPlay) { // finish a frame step on a never-started player
-          pauseOnPlay = false; player.pauseVideo(); if (cursor !== null) player.seekTo(cursor, true);
-        }
-      },
-      onError: (e) => {
-        durationPoll++;
-        const msgs = { 2: 'Invalid video ID.', 5: 'Player error.', 100: 'Video not found or private.',
-                       101: 'The owner disabled embedding for this video.', 150: 'The owner disabled embedding for this video.',
-                       153: 'Embedding blocked (player configuration error).' };
-        setStatus(msgs[e.data] || `Player error ${e.data}`, 'error');
-      },
-    },
-  });
-  $('player-wrap').classList.add('loaded');
+    });
+  },
+
+  waitDuration() {
+    const mine = ++this.poll; // a newer load cancels older polls
+    const began = Date.now();
+    const tick = () => {
+      if (mine !== this.poll || !this.waiter) return;
+      const p = this.player;
+      const d = p.getDuration?.();
+      if (d > 0 && p.getVideoData?.()?.video_id === this.videoId) {
+        const w = this.waiter; this.waiter = null; w.resolve({ duration: d });
+      } else if (Date.now() - began > 20000) this.fail(new Error('Could not load the video (timed out).'));
+      else setTimeout(tick, 200);
+    };
+    tick();
+  },
+
+  fail(err) { this.poll++; const w = this.waiter; this.waiter = null; w?.reject(err); },
+
+  play() { this.ready && this.player.playVideo(); },
+  pause() { this.ready && this.player.pauseVideo(); },
+  seek(t) { this.ready && this.player.seekTo(t, true); },
+  seekPaused(t) {
+    this.pause();
+    this.seek(t);
+    // A never-started (-1) or cued (5) player ignores seeks until it has played once.
+    const st = this.player.getPlayerState();
+    if (st === YT.PlayerState.UNSTARTED || st === YT.PlayerState.CUED) { this.pauseOnPlay = true; this.player.playVideo(); }
+  },
+  time() { return this.ready ? this.player.getCurrentTime() : 0; },
+  playing() { return this.ready && this.player.getPlayerState() === YT.PlayerState.PLAYING; },
+};
+
+// Clicking the YouTube player gives the cross-origin iframe keyboard focus, so the page would never see
+// the arrow keys. Hand focus straight back to the page.
+window.addEventListener('blur', () => setTimeout(() => {
+  if (document.activeElement && document.activeElement.tagName === 'IFRAME') document.activeElement.blur();
+}, 0));
+
+function setMode(mode, msg = '') {
+  $('player-wrap').dataset.mode = mode;
+  $('player-msg').textContent = msg;
+  $('trim').classList.toggle('nopreview', mode === 'none');
+  if (mode !== 'yt') yt.pause();
+  if (mode !== 'html5' && html5.el.getAttribute('src')) html5.unload();
+  pl = { yt, html5, none: noPreview }[mode];
 }
 
-// Frame stepping. The player API has no frame info, so assume 30 fps until yt-dlp reports the real rate.
-let fps = 30;
-let pauseOnPlay = false;
-let cursor = null; // last frame-step target; getCurrentTime() can lag right after a seek
+// ---------- loading ----------
+function setFps(f) {
+  fps = f || 30;
+  $('fps').textContent = f ? `${+f.toFixed(2)} fps` : '30 fps (assumed)';
+}
 
-function loadFps(id) {
-  fps = 30;
-  $('fps').textContent = '30 fps (assumed)';
-  api.videoFps(id).then((f) => {
-    if (f && id === currentId) { fps = f; $('fps').textContent = `${+f.toFixed(2)} fps`; }
-  });
+async function loadVideo(url) {
+  const token = ++loadToken;
+  const stale = () => token !== loadToken;
+  currentUrl = url;
+  duration = 0;
+  playingSelection = false;
+  cursor = null;
+  $('trim').classList.add('disabled');
+  $('download').disabled = true;
+  $('player-wrap').classList.add('loaded');
+  setStatus('Loading video…');
+
+  const ytId = videoId(url);
+  let info = null;
+  let meta = {};
+  try {
+    if (ytId) {
+      setMode('yt');
+      try { info = await yt.load(ytId); } catch (e) {
+        if (stale()) return;
+        if (!EMBED_BLOCKED.includes(e.code)) throw e;
+        if (!ytdlpInstalled) throw new Error(`${e.message} Install yt-dlp to preview such videos.`);
+        setStatus('Embedding is blocked – trying a direct stream…');
+      }
+    }
+    if (stale()) return;
+
+    if (!info) { // non-YouTube site, or a YouTube video that can't be embedded
+      if (!ytdlpInstalled) { showModal(INSTALL_TEXT); throw new Error('yt-dlp is required for this site.'); }
+      setStatus('Resolving video…');
+      meta = await api.resolveMedia(url);
+      if (stale()) return;
+      if (!meta.ok) throw new Error(meta.error);
+      if (meta.streamUrl) {
+        setMode('html5');
+        try {
+          info = await html5.load(meta.streamUrl);
+          if (info.audioOnly) $('player-msg').textContent = 'Audio only';
+        } catch { if (stale()) return; }
+      }
+      if (!info) {
+        if (!(meta.duration > 0)) throw new Error('Could not determine the length of this video.');
+        setMode('none', 'No preview available for this video – type the start and end times below.');
+        info = { duration: meta.duration };
+      }
+    }
+    if (stale()) return;
+
+    duration = info.duration;
+    start = 0;
+    end = duration;
+    $('total').textContent = fmt(duration);
+    $('trim').classList.remove('disabled');
+    $('download').disabled = downloading;
+    setStatus(meta.title ? `Ready – ${meta.title}` : 'Ready – set your start and end markers');
+    render();
+
+    if (ytId && !meta.ok) { // YouTube embed: the player API has no fps, ask yt-dlp in the background
+      setFps(null);
+      api.videoFps(ytId).then((f) => { if (f && !stale()) setFps(f); });
+    } else setFps(meta.fps);
+  } catch (e) {
+    if (!stale()) setStatus(e.message, 'error');
+  }
 }
 
 function stepFrame(dir) {
-  if (!player || !duration) return;
+  if (!pl || !duration) return;
   playingSelection = false;
-  player.pauseVideo();
-  const t = cursor ?? player.getCurrentTime();
+  const t = cursor ?? pl.time();
   const last = Math.max(0, Math.ceil(duration * fps) - 1);
   const frame = Math.min(last, Math.max(0, Math.floor(t * fps + 1e-3) + dir));
   cursor = (frame + 0.25) / fps; // aim inside the frame so float error can't land on a neighbour
-  player.seekTo(cursor, true);
-  // A never-started (-1) or cued (5) player ignores seeks until it has played once.
-  const st = player.getPlayerState();
-  if (st === YT.PlayerState.UNSTARTED || st === YT.PlayerState.CUED) { pauseOnPlay = true; player.playVideo(); }
+  pl.seekPaused(cursor);
 }
 $('prev-frame').onclick = () => stepFrame(-1);
 $('next-frame').onclick = () => stepFrame(1);
@@ -118,36 +259,6 @@ window.addEventListener('keydown', (e) => {
   e.preventDefault();
   stepFrame(e.key === 'ArrowLeft' ? -1 : 1);
 });
-
-let durationPoll = 0;
-// Clicking the player gives the cross-origin iframe keyboard focus, so the page would never see the arrow
-// keys. Hand focus straight back to the page.
-window.addEventListener('blur', () => setTimeout(() => {
-  if (document.activeElement && document.activeElement.tagName === 'IFRAME') document.activeElement.blur();
-}, 0));
-
-function waitForDuration() {
-  const mine = ++durationPoll; // a newer load cancels older polls
-  const began = Date.now();
-  const tick = () => {
-    if (mine !== durationPoll) return;
-    const d = player.getDuration && player.getDuration();
-    const loaded = player.getVideoData?.()?.video_id === currentId;
-    if (d > 0 && loaded) {
-      duration = d;
-      start = 0; end = d;
-      $('total').textContent = fmt(d);
-      $('trim').classList.remove('disabled');
-      $('download').disabled = downloading;
-      setStatus('Ready — set your start and end markers');
-      render();
-      loadFps(currentId);
-    } else if (Date.now() - began > 20000) {
-      setStatus('Could not load the video (timed out).', 'error');
-    } else setTimeout(tick, 200);
-  };
-  tick();
-}
 
 // ---------- timeline ----------
 const track = $('track');
@@ -168,7 +279,7 @@ function timeFromEvent(e) {
   return Math.min(duration, Math.max(0, ((e.clientX - r.left) / r.width) * duration));
 }
 
-function seek(t) { cursor = null; if (player && duration) player.seekTo(t, true); }
+function seek(t) { cursor = null; if (pl && duration) pl.seek(t); }
 
 function dragHandle(el, which) {
   el.addEventListener('pointerdown', (e) => {
@@ -176,7 +287,7 @@ function dragHandle(el, which) {
     el.setPointerCapture(e.pointerId);
     el.classList.add('drag');
     playingSelection = false;
-    if (player.getPlayerState() === YT.PlayerState.PLAYING) player.pauseVideo();
+    if (pl.playing()) pl.pause();
     let last = 0;
     const move = (ev) => {
       let t = timeFromEvent(ev);
@@ -220,37 +331,36 @@ for (const [id, which] of [['t-start', 'start'], ['t-end', 'end']]) {
   $(id).addEventListener('blur', (e) => commitTimeInput(e.target, which));
 }
 
-$('set-start').onclick = () => { start = Math.min(player.getCurrentTime(), end - 0.1); render(); };
-$('set-end').onclick = () => { end = Math.max(player.getCurrentTime(), start + 0.1); render(); };
+$('set-start').onclick = () => { start = Math.min(pl.time(), end - 0.1); render(); };
+$('set-end').onclick = () => { end = Math.max(pl.time(), start + 0.1); render(); };
 
 // ---------- playback controls ----------
 $('play-toggle').onclick = () => {
   playingSelection = false; cursor = null;
-  player.getPlayerState() === YT.PlayerState.PLAYING ? player.pauseVideo() : player.playVideo();
+  pl.playing() ? pl.pause() : pl.play();
 };
 $('play-sel').onclick = () => {
   playingSelection = true; cursor = null;
-  player.seekTo(start, true);
-  player.playVideo();
+  pl.seek(start);
+  pl.play();
 };
 
 setInterval(() => {
-  if (!player || !duration || !player.getCurrentTime) return;
-  const t = player.getCurrentTime();
+  if (!pl || !duration) return;
+  const t = pl.time();
   $('playhead').style.left = pct(t) + '%';
   $('now').textContent = fmt(cursor !== null ? Math.floor(cursor * fps + 1e-3) / fps : t, 2);
-  if (cursor !== null && (Math.abs(t - cursor) > 0.5 || player.getPlayerState() === YT.PlayerState.PLAYING)) cursor = null;
+  if (cursor !== null && (Math.abs(t - cursor) > 0.5 || pl.playing())) cursor = null;
   if (playingSelection && t >= end) {
-    if ($('loop').checked) player.seekTo(start, true);
-    else { player.pauseVideo(); player.seekTo(end, true); playingSelection = false; }
+    if ($('loop').checked) pl.seek(start);
+    else { pl.pause(); pl.seek(end); playingSelection = false; }
   }
 }, 80);
 
-// ---------- loading ----------
 function onLoad() {
-  const id = videoId($('url').value);
-  if (!id) { setStatus('Please enter a valid youtube.com / youtu.be video URL.', 'error'); return; }
-  loadVideo(id);
+  const url = $('url').value.trim();
+  if (!/^https?:\/\/\S+$/i.test(url)) { setStatus('Please enter a valid video URL (starting with http:// or https://).', 'error'); return; }
+  loadVideo(url);
 }
 $('load').onclick = onLoad;
 $('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') onLoad(); });
@@ -275,7 +385,7 @@ api.onProgress((m) => {
 });
 
 $('download').onclick = async () => {
-  if (!currentId || downloading) return;
+  if (!currentUrl || downloading) return;
   if (!ytdlpInstalled) { showModal(INSTALL_TEXT); return; }
   downloading = true;
   $('download').disabled = true;
@@ -286,7 +396,7 @@ $('download').onclick = async () => {
 
   const trimmed = start > 0.05 || end < duration - 0.05;
   const result = await api.download({
-    url: `https://www.youtube.com/watch?v=${currentId}`,
+    url: currentUrl,
     start: trimmed ? start : null,
     end: trimmed ? end : null,
     format: $('format').value,

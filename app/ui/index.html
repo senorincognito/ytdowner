@@ -8,13 +8,15 @@
 </head>
 <body>
   <header>
-    <input id="url" type="text" placeholder="Paste a youtube.com video URL…" spellcheck="false">
+    <input id="url" type="text" placeholder="Paste a video URL (YouTube or any site supported by yt-dlp)…" spellcheck="false">
     <button id="load" class="primary">Load</button>
   </header>
 
   <main>
     <div id="player-wrap">
       <div id="player"></div>
+      <video id="video" playsinline preload="metadata"></video>
+      <div id="player-msg"></div>
       <div id="placeholder">Paste a link above to load a video</div>
     </div>
 

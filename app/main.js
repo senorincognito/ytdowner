@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, session } = require('electron');
 const { spawn } = require('child_process');
 const http = require('http');
 const https = require('https');
@@ -107,6 +107,49 @@ ipcMain.handle('ytdlp-latest', () => new Promise((resolve) => {
   req.on('timeout', () => { req.destroy(); resolve(null); });
 }));
 
+// Resolve any yt-dlp-supported page URL to something the preview can play: a direct progressive stream
+// (HLS/DASH can't be played by <video>), plus title / duration / fps. streamUrl is null if none is playable.
+const PLAYABLE = '[protocol^=http][protocol!*=m3u8][protocol!*=dash]';
+const PLAYABLE_EXT = ['mp4', 'webm', 'm4a', 'mp3', 'ogg', 'opus', 'wav']; // containers Chromium can play
+// Prefer playable video (<=720p), then playable audio, then anything (the preview then falls back to "none").
+const PREVIEW_FORMAT = [
+  ...['mp4', 'webm'].flatMap((x) => [`b${PLAYABLE}[ext=${x}][height<=720]`, `b${PLAYABLE}[ext=${x}]`]),
+  ...['m4a', 'mp3', 'webm', 'ogg', 'opus'].map((x) => `ba${PLAYABLE}[ext=${x}]`),
+  'b', 'ba', 'best',
+].join('/');
+const mediaHeaders = new Map(); // host -> request headers the CDN expects (Referer, UA, cookies…)
+
+ipcMain.handle('resolve-media', (_e, url) => new Promise((resolve) => {
+  if (!fs.existsSync(YTDLP)) return resolve({ ok: false, error: 'yt-dlp is not installed.' });
+  let out = '', err = '';
+  const c = spawn(YTDLP, ['--no-playlist', '--no-warnings', '--js-runtimes', 'node', '-j',
+    '-f', PREVIEW_FORMAT, url], { windowsHide: true });
+  c.stdout.on('data', (d) => { out += d; });
+  c.stderr.on('data', (d) => { err += d; });
+  c.on('error', (e) => resolve({ ok: false, error: `Could not start yt-dlp: ${e.message}` }));
+  c.on('close', (code) => {
+    let info;
+    try { info = JSON.parse(out); } catch { info = null; }
+    if (code !== 0 || !info) {
+      return resolve({ ok: false, error: err.split('\n').filter((l) => l.startsWith('ERROR')).pop() || 'yt-dlp could not read this URL.' });
+    }
+    const proto = info.protocol || '';
+    const playable = info.url && /^https?/.test(proto) && !/m3u8|dash/.test(proto) && PLAYABLE_EXT.includes(info.ext);
+    if (playable) {
+      const h = {};
+      for (const k of ['User-Agent', 'Referer', 'Origin', 'Cookie']) if (info.http_headers?.[k]) h[k] = info.http_headers[k];
+      try { mediaHeaders.set(new URL(info.url).host, h); } catch { /* ignore */ }
+    }
+    resolve({
+      ok: true,
+      title: info.title || '',
+      duration: info.duration || 0,
+      fps: info.fps || null,
+      streamUrl: playable ? info.url : null,
+    });
+  });
+}));
+
 // Frame rate of the video (YouTube's player API doesn't expose it). null if unknown.
 const fpsCache = new Map();
 ipcMain.handle('video-fps', (_e, id) => new Promise((resolve) => {
@@ -181,5 +224,14 @@ ipcMain.handle('download', (event, { url, start, end, format, folder }) => new P
   });
 }));
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  // Some CDNs only serve the stream with the headers yt-dlp reported for it.
+  session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ['http://*/*', 'https://*/*'] }, (details, cb) => {
+    let extra;
+    try { extra = mediaHeaders.get(new URL(details.url).host); } catch { /* ignore */ }
+    if (extra) Object.assign(details.requestHeaders, extra);
+    cb({ requestHeaders: details.requestHeaders });
+  });
+  createWindow();
+});
 app.on('window-all-closed', () => app.quit());

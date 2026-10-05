@@ -98,3 +98,14 @@ footer label.grow input { flex: 1; }
 button.link { background: none; border: 1px solid #f0b429; color: #f0b429; padding: 1px 8px; font-size: 11px; margin-left: 4px; }
 button.link:hover:not(:disabled) { background: rgba(240, 180, 41, .15); }
 .hint-inline { color: var(--muted); font-size: 12px; margin-right: 10px; }
+
+/* preview modes: yt (iframe) | html5 (<video>) | none */
+#video { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; object-fit: contain; display: none; }
+#player-wrap[data-mode="html5"] #video { display: block; }
+#player-wrap[data-mode="html5"] #player, #player-wrap[data-mode="none"] #player { display: none; }
+#player-msg { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 24px;
+  color: var(--muted); pointer-events: none; }
+#player-msg:empty { display: none; }
+#player-wrap[data-mode="html5"] #player-msg { place-items: end center; padding: 10px; font-size: 12px; }
+#trim.nopreview .controls, #trim.nopreview #set-start, #trim.nopreview #set-end,
+#trim.nopreview #playhead, #trim.nopreview #now { display: none; }
