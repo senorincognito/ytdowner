@@ -94,3 +94,6 @@ footer label.grow input { flex: 1; }
 .dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
 #modal-bar { height: 8px; background: #2a2f39; border-radius: 4px; overflow: hidden; margin-bottom: 14px; }
 #modal-fill { height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+#update-hint { color: #f0b429; }
+button.link { background: none; border: 1px solid #f0b429; color: #f0b429; padding: 1px 8px; font-size: 11px; margin-left: 4px; }
+button.link:hover:not(:disabled) { background: rgba(240, 180, 41, .15); }

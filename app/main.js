@@ -92,7 +92,21 @@ ipcMain.handle('ytdlp-status', async () => {
   return { installed: !!version, version, path: YTDLP };
 });
 
-ipcMain.handle('ytdlp-install', async (event) => {
+// Latest published release tag, e.g. "2026.08.19". Resolves null when offline / rate-limited.
+ipcMain.handle('ytdlp-latest', () => new Promise((resolve) => {
+  const req = https.get('https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest',
+    { headers: { 'User-Agent': 'ytdown', Accept: 'application/vnd.github+json' }, timeout: 8000 }, (res) => {
+      let body = '';
+      res.on('data', (d) => { body += d; });
+      res.on('end', () => {
+        try { resolve(res.statusCode === 200 ? JSON.parse(body).tag_name || null : null); } catch { resolve(null); }
+      });
+    });
+  req.on('error', () => resolve(null));
+  req.on('timeout', () => { req.destroy(); resolve(null); });
+}));
+
+ipcMain.handle('ytdlp-install',async (event) => {
   const part = YTDLP + '.part';
   try {
     fs.mkdirSync(BIN_DIR, { recursive: true });

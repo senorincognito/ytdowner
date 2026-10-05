@@ -245,10 +245,30 @@ let ytdlpInstalled = false;
 async function refreshYtdlp() {
   const s = await api.ytdlpStatus();
   ytdlpInstalled = s.installed;
-  $('ytdlp-info').textContent = s.installed ? `yt-dlp ${s.version}` : 'yt-dlp: not installed';
+  $('ytdlp-version').textContent = s.installed ? `yt-dlp ${s.version}` : 'yt-dlp: not installed';
   $('update-ytdlp').textContent = s.installed ? 'Update yt-dlp' : 'Install yt-dlp';
+  $('update-hint').hidden = true;
+  if (s.installed) checkForUpdate(s.version);
   return s;
 }
+
+// true when version string a is newer than b (both like "2026.08.19" or "2026.08.19.232857")
+function isNewer(a, b) {
+  const x = a.split('.').map(Number), y = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] || 0) - (y[i] || 0);
+    if (d) return d > 0;
+  }
+  return false;
+}
+
+async function checkForUpdate(installed) {
+  const latest = await api.ytdlpLatest();
+  if (!latest || !ytdlpInstalled || !isNewer(latest, installed)) return;
+  $('update-text').textContent = `Update available: ${latest}`;
+  $('update-hint').hidden = false;
+}
+$('update-now').onclick = () => { $('update-hint').hidden = true; showModal(UPDATE_TEXT); $('modal-go').click(); };
 
 function showModal({ title, text, button }) {
   $('modal-title').textContent = title;
