@@ -11,8 +11,12 @@ const ROOT = __dirname;
 // Local/dev runs keep the binary in <project>/bin; packaged builds can't write next to the (read-only)
 // app archive, so they use the per-user data folder instead.
 const BIN_DIR = app.isPackaged ? path.join(app.getPath('userData'), 'bin') : path.join(ROOT, '..', 'bin');
-const YTDLP = path.join(BIN_DIR, 'yt-dlp.exe');
-const YTDLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe';
+// yt-dlp publishes one standalone binary per platform (macOS: a universal build for Intel and Apple silicon)
+const YTDLP_ASSET = process.platform === 'win32' ? 'yt-dlp.exe'
+  : process.platform === 'darwin' ? 'yt-dlp_macos'
+  : process.arch === 'arm64' ? 'yt-dlp_linux_aarch64' : 'yt-dlp_linux';
+const YTDLP = path.join(BIN_DIR, YTDLP_ASSET);
+const YTDLP_URL = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${YTDLP_ASSET}`;
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
 
@@ -145,14 +149,21 @@ ipcMain.handle('prepare-file', async (_e, p) => {
 });
 
 
+let ytdlpProblem = ''; // why the last version check failed, for the error shown after an install
+
 function ytdlpVersion() {
   return new Promise((resolve) => {
+    ytdlpProblem = '';
     if (!fs.existsSync(YTDLP)) return resolve(null);
-    let out = '';
+    let out = '', err = '';
     const c = spawn(YTDLP, ['--version'], { windowsHide: true });
     c.stdout.on('data', (d) => { out += d; });
-    c.on('error', () => resolve(null));
-    c.on('close', (code) => resolve(code === 0 ? out.trim() : null));
+    c.stderr.on('data', (d) => { err += d; });
+    c.on('error', (e) => { ytdlpProblem = e.message; resolve(null); });
+    c.on('close', (code) => {
+      if (code !== 0) ytdlpProblem = err.trim().split('\n').pop() || `exited with code ${code}`;
+      resolve(code === 0 ? out.trim() : null);
+    });
   });
 }
 
@@ -262,9 +273,14 @@ ipcMain.handle('ytdlp-install', async (event) => {
   try {
     fs.mkdirSync(BIN_DIR, { recursive: true });
     await fetchToFile(YTDLP_URL, part, (percent) => event.sender.send('ytdlp-install-progress', { percent }));
+    if (process.platform !== 'win32') fs.chmodSync(part, 0o755); // downloads are not executable by default
     fs.renameSync(part, YTDLP);
     const version = await ytdlpVersion();
-    if (!version) throw new Error('Downloaded file does not run correctly');
+    if (!version) {
+      const why = ytdlpProblem;
+      fs.rmSync(YTDLP, { force: true }); // don't leave a broken binary behind
+      throw new Error(`Downloaded file does not run correctly${why ? ` (${why})` : ''}`);
+    }
     return { ok: true, version };
   } catch (e) {
     fs.rmSync(part, { force: true });

@@ -629,7 +629,7 @@ function showModal({ title, text, button }) {
 }
 
 const INSTALL_TEXT = { title: 'yt-dlp is required', button: 'Download yt-dlp',
-  text: "This app uses <b>yt-dlp</b> to fetch the audio. It isn't installed yet. Download it now (about 18&nbsp;MB, from the official GitHub releases)?" };
+  text: "This app uses <b>yt-dlp</b> to fetch the audio. It isn't installed yet. Download it now (roughly 20–40&nbsp;MB, from the official GitHub releases)?" };
 const UPDATE_TEXT = { title: 'Update yt-dlp', button: 'Update',
   text: 'Download the latest yt-dlp release and replace the current one? Do this if downloads start failing.' };
 

@@ -4,7 +4,7 @@ Desktop app (Electron) that downloads the audio (or video) of an online video, o
 
 ## Setup
 1. `npm install`
-2. Download `yt-dlp.exe` from https://github.com/yt-dlp/yt-dlp/releases/latest into `bin/`
+2. (Optional) the app offers to download yt-dlp itself on first start; to do it by hand, put the standalone binary for your platform (`yt-dlp.exe`, `yt-dlp_macos`, `yt-dlp_linux`) from https://github.com/yt-dlp/yt-dlp/releases/latest into `bin/` (`chmod +x` on macOS/Linux)
 3. Make sure `ffmpeg` (with `ffprobe`) and `node` are on your PATH
 4. `npm start` (or run `start.bat`)
 
