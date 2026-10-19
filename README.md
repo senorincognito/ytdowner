@@ -16,3 +16,11 @@ npm run build:dir    # unpacked app only (fast, for testing) -> dist/win-unpacke
 - Output: `dist/Video and Audio Trimmer-Setup-<version>.exe` (installer) and `dist/Video and Audio Trimmer-<version>-portable.exe`.
 - Packaged builds store yt-dlp in `%APPDATA%\ytdown\bin` (the app offers to download it on first start); dev runs use `bin/`.
 - Builds are unsigned and use the default Electron icon.
+
+## Local files
+Open a file (or drop it onto the window) to trim it. Choose **Audio** to extract the sound track of a video, or **Video** to keep the picture. The tick box **Fast (no re-encode)** copies the streams instead: near-instant and lossless, but video is cut at the nearest keyframe.
+
+The ffmpeg code lives in `app/media.js` (`trim()`, `extractAudio()`, `probe()`).
+
+## Tests
+`npm test` runs `test/media.test.js` against real ffmpeg (needs `ffmpeg` and `ffprobe` on your PATH).

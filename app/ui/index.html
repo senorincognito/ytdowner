@@ -74,6 +74,10 @@
           <option value="480">480p</option><option value="360">360p</option>
         </select>
       </label>
+      <label id="fast-label" class="check" hidden
+        title="Copy the streams instead of re-encoding: very fast and lossless, but video is cut at the nearest keyframe (can be off by a second or two).">
+        <input type="checkbox" id="fast"> Fast (no re-encode)
+      </label>
       <label class="grow">Save to
         <input id="folder" type="text" readonly>
       </label>

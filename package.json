@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node launch.js",
     "build": "electron-builder --win",
-    "build:dir": "electron-builder --win --dir"
+    "build:dir": "electron-builder --win --dir",
+    "test": "node --test"
   },
   "license": "MIT",
   "devDependencies": {

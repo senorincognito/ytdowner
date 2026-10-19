@@ -218,7 +218,10 @@ async function loadLocalFile(p) {
     const meta = await api.prepareFile(p);
     if (stale()) return;
     if (!meta.ok) throw new Error(meta.error);
+    localInfo = { audioExt: meta.audioExt };
+    $('fast-label').hidden = false;
     setKindCaps(meta.hasVideo);
+    renderFormats();
 
     let info = null;
     setMode('html5');
@@ -245,6 +248,10 @@ async function loadVideo(url) {
   const stale = () => token !== loadToken;
   currentUrl = url;
   currentFile = null;
+  localInfo = null;
+  $('fast-label').hidden = true; // stream copy only exists for local files
+  $('fast').checked = false;
+  renderFormats();
   setKindCaps(true);
   setDefaultName('');
   duration = 0;
@@ -456,19 +463,39 @@ $('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') onLoad(); }
 const FORMATS = { audio: ['mp3', 'm4a', 'opus', 'wav'], video: ['mp4', 'mkv'] };
 const lastFormat = { audio: 'mp3', video: 'mp4' };
 
+// "Fast" (local files only): copy the streams instead of re-encoding. Audio then keeps its original codec, so
+// its extension is fixed by what is in the file (aac -> .m4a, mp3 -> .mp3, ...).
+let localInfo = null; // { audioExt } of the loaded local file
+const copyMode = () => !!currentFile && $('fast').checked;
+
 function applyKind() {
-  const kind = $('kind').value;
-  $('format').innerHTML = FORMATS[kind].map((f) => `<option>${f}</option>`).join('');
-  $('format').value = lastFormat[kind];
-  $('quality-label').hidden = kind !== 'video';
   updateActionLabel();
-  $('ext').textContent = `.${$('format').value}`;
+  renderFormats();
+}
+function renderFormats() {
+  const kind = $('kind').value;
+  const fast = copyMode();
+  if (fast && kind === 'audio') { // codec stays as is: nothing to choose
+    $('format').innerHTML = `<option>original</option>`;
+    $('format').disabled = true;
+  } else {
+    $('format').disabled = false;
+    $('format').innerHTML = FORMATS[kind].map((f) => `<option>${f}</option>`).join('');
+    $('format').value = lastFormat[kind];
+  }
+  $('quality-label').hidden = kind !== 'video' || fast; // a copy can't be scaled
+  $('ext').textContent = `.${outputFormat()}`;
+}
+// Container / extension of the file that will be written.
+function outputFormat() {
+  return copyMode() && $('kind').value === 'audio' ? (localInfo?.audioExt || 'mka') : $('format').value;
 }
 function updateActionLabel() {
   $('download').textContent = `${currentFile ? 'Save' : 'Download'} ${$('kind').value}`;
 }
 $('kind').onchange = applyKind;
-$('format').onchange = () => { lastFormat[$('kind').value] = $('format').value; $('ext').textContent = `.${$('format').value}`; };
+$('format').onchange = () => { lastFormat[$('kind').value] = $('format').value; $('ext').textContent = `.${outputFormat()}`; };
+$('fast').onchange = renderFormats;
 
 // File name: prefilled from the video title, freely editable. Empty = let yt-dlp use the title.
 function safeName(s) {
@@ -555,7 +582,8 @@ $('download').onclick = async () => {
     end: trimmed ? end : null,
     duration,
     kind: $('kind').value,
-    format: $('format').value,
+    format: outputFormat(),
+    copy: copyMode(),
     height: Number($('quality').value),
     folder: $('folder').value,
     name: $('filename').value,

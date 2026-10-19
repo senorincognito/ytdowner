@@ -5,6 +5,7 @@ const https = require('https');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
+const media = require('./media');
 const path = require('path');
 
 const ROOT = __dirname;
@@ -113,35 +114,12 @@ ipcMain.handle('open-file', async () => {
   return r.canceled ? null : r.filePaths[0];
 });
 
-function probeFile(p) {
-  return new Promise((resolve) => {
-    let out = '', err = '';
-    const c = spawn('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', p], { windowsHide: true });
-    c.stdout.on('data', (d) => { out += d; });
-    c.stderr.on('data', (d) => { err += d; });
-    c.on('error', () => resolve({ ok: false, error: 'ffprobe was not found. It ships with ffmpeg – make sure ffmpeg is installed and on your PATH.' }));
-    c.on('close', () => {
-      let j;
-      try { j = JSON.parse(out); } catch { j = null; }
-      if (!j) return resolve({ ok: false, error: err.trim().split('\n').pop() || 'This file could not be read.' });
-      const streams = j.streams || [];
-      const video = streams.find((s) => s.codec_type === 'video' && !s.disposition?.attached_pic); // skip cover art
-      const hasAudio = streams.some((s) => s.codec_type === 'audio');
-      if (!video && !hasAudio) return resolve({ ok: false, error: 'No audio or video stream found in this file.' });
-      const rate = (str) => { const [a, b] = String(str || '').split('/').map(Number); return b ? a / b : a; };
-      const fps = video ? [rate(video.avg_frame_rate), rate(video.r_frame_rate)].find((f) => f > 0 && f <= 240) || null : null;
-      const duration = Number(j.format?.duration) || Math.max(0, ...streams.map((s) => Number(s.duration) || 0));
-      resolve({ ok: true, duration, fps: fps ? Math.round(fps * 100) / 100 : null, hasVideo: !!video, hasAudio });
-    });
-  });
-}
-
 // Validates a picked/dropped file, probes it and makes it playable in the preview.
 ipcMain.handle('prepare-file', async (_e, p) => {
   let st;
   try { st = fs.statSync(p); } catch { return { ok: false, error: 'File not found.' }; }
   if (!st.isFile()) return { ok: false, error: 'That is not a file.' };
-  const info = await probeFile(p);
+  const info = await media.probe(p);
   if (!info.ok) return info;
   const token = crypto.randomUUID();
   localFiles.set(token, p);
@@ -314,13 +292,6 @@ function runChild(job, cmd, args, onLine) {
   });
 }
 
-const AUDIO_CODEC = {
-  mp3: ['-c:a', 'libmp3lame', '-q:a', '0'],
-  m4a: ['-c:a', 'aac', '-b:a', '192k'],
-  opus: ['-c:a', 'libopus', '-b:a', '160k'],
-  wav: ['-c:a', 'pcm_s16le'],
-};
-
 const lastError = (text, fallback) =>
   text.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('ERROR') || (l && !l.startsWith('['))).pop() || fallback;
 
@@ -340,7 +311,7 @@ const sameFile = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toL
 const SOURCE_CLASH = 'The output would overwrite the source file – choose a different name or folder.';
 
 // `localPath` set = trim a file from disk: no yt-dlp, just the ffmpeg cut/encode step.
-ipcMain.handle('download', async (event, { url, file: localPath, kind, start, end, duration, format, height, folder, name, overwrite }) => {
+ipcMain.handle('download', async (event, { url, file: localPath, kind, start, end, duration, format, height, copy, folder, name, overwrite }) => {
   if (activeDownload) return { ok: false, error: 'A download is already running.' };
   const local = !!localPath;
   const cleanName = sanitizeName(name);
@@ -357,7 +328,6 @@ ipcMain.handle('download', async (event, { url, file: localPath, kind, start, en
   };
 
   const trimmed = start != null || end != null;
-  const clipLen = trimmed || local ? (end ?? duration ?? 0) - (start ?? 0) : 0;
   let streams = local ? 0 : kind === 'video' ? 2 : 1; // yt-dlp tells us the real number once it has picked formats
   let stream = 0;
   const steps = () => streams + (trimmed || local ? 1 : 0); // one extra step for the local cut
@@ -430,42 +400,23 @@ ipcMain.handle('download', async (event, { url, file: localPath, kind, start, en
     fs.mkdirSync(folder, { recursive: true }); // yt-dlp would create it; here ffmpeg writes the output
     outFile = path.join(folder, `${base}.${format}`);
     if (local && sameFile(outFile, localPath)) { outFile = null; return { ok: false, error: SOURCE_CLASH }; }
-    const ff = ['-y', '-hide_banner', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1'];
-    if (start != null) ff.push('-ss', String(start));
-    ff.push('-i', file);
-    if (end != null) ff.push('-t', String(clipLen));
-    if (kind === 'video') {
-      if (height) ff.push('-vf', `scale=-2:'min(ih,${Number(height)})'`); // cap the height, keep the aspect ratio
-      ff.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k');
-      if (format === 'mp4') ff.push('-movflags', '+faststart');
-    } else {
-      ff.push('-vn', ...AUDIO_CODEC[format]);
-    }
-    ff.push(outFile);
-
     send({ stage: 'converting' });
-    let outSec = null, speedX = 0;
-    const onFfmpegLine = (line) => {
-      line = line.trim();
-      let m;
-      if ((m = /^out_time_us=(\d+)/.exec(line))) outSec = Number(m[1]) / 1e6;
-      else if ((m = /^speed=\s*([\d.]+)x/.exec(line))) speedX = parseFloat(m[1]);
-      else if (line.startsWith('progress=') && outSec != null && clipLen > 0) {
-        const frac = Math.min(1, outSec / clipLen);
-        send({
-          stage: 'downloading',
-          percent: ((steps() - 1 + frac) / steps()) * 100,
-          step: steps() > 1 ? { n: steps(), of: steps() } : null,
-          trim: true,
-          eta: speedX > 0 ? Math.max(0, clipLen - outSec) / speedX : null,
-        });
-      }
-    };
-    const cut = await runChild(job, 'ffmpeg', ff, onFfmpegLine);
+    const doCut = kind === 'audio' ? media.extractAudio : media.trim; // the output extension picks the format
+    const cut = await doCut({
+      input: file, output: outFile, start, end, duration, copy: !!copy, height: Number(height) || 0,
+      onSpawn: (child) => { job.child = child; },
+      onProgress: ({ fraction, eta }) => send({
+        stage: 'downloading',
+        percent: ((steps() - 1 + fraction) / steps()) * 100,
+        step: steps() > 1 ? { n: steps(), of: steps() } : null,
+        trim: true,
+        eta,
+      }),
+    });
     if (job.cancelled) throw Object.assign(new Error('cancelled'), { cancelled: true });
-    if (cut.code !== 0) {
+    if (!cut.ok) {
       fs.rmSync(outFile, { force: true });
-      return { ok: false, error: lastError(cut.err, cut.code === -1 ? cut.err : `ffmpeg exited with ${cut.code}`) };
+      return { ok: false, error: cut.error };
     }
     return { ok: true, file: outFile };
   } catch (e) {
